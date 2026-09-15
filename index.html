@@ -194,7 +194,7 @@
 
   <div class="refresh-row">
     <button class="refresh-btn" id="refreshBtn">立即刷新</button>
-    <div class="countdown" id="countdown">下次刷新 10s</div>
+    <div class="countdown" id="countdown">下次刷新 5s</div>
   </div>
 
   <div id="content">
@@ -202,7 +202,7 @@
   </div>
 
   <div class="liq-card">
-    <div class="label">清算图 · Coinglass（Binance）</div>
+    <div class="label">清算图 · OKX 永续强平</div>
     <div id="liqContent"><div class="liq-empty">正在加载清算数据…</div></div>
   </div>
 
@@ -220,7 +220,7 @@
 </div>
 
 <script>
-const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 10 };
+const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 5 };
 const OKX_BASE = 'https://www.okx.com';
 
 function emaSeries(values, period){
@@ -526,8 +526,6 @@ async function loadData(){
   }
 }
 
-const COINGLASS_KEY = 'a300ee0a5fde4de5a1a2ec69a783b762';
-const COINGLASS_BASE = 'https://open-api-v4.coinglass.com';
 
 function fmtUsd(n){
   const abs = Math.abs(n);
@@ -536,85 +534,92 @@ function fmtUsd(n){
   return n.toFixed(0);
 }
 
-function pick(obj, keys, fallback){
-  for(const k of keys){ if(obj[k] !== undefined && obj[k] !== null) return obj[k]; }
-  return fallback;
+async function fetchLiquidations(uly){
+  const url = `${OKX_BASE}/api/v5/public/liquidation-orders?instType=SWAP&uly=${uly}&state=filled&limit=100`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('liquidation request failed');
+  const json = await res.json();
+  if(json.code !== '0') throw new Error(json.msg || 'liquidation error');
+  const details = [];
+  (json.data || []).forEach(group => {
+    (group.details || []).forEach(d => details.push(d));
+  });
+  return details;
 }
 
 async function loadLiquidation(){
   const el = document.getElementById('liqContent');
-  const symbol = state.name + 'USDT';
-  const headers = { accept: 'application/json', 'CG-API-KEY': COINGLASS_KEY };
+  const uly = state.name + '-USDT';
   try{
-    const [histRes, mapRes] = await Promise.all([
-      fetch(`${COINGLASS_BASE}/api/futures/liquidation/history?exchange=Binance&symbol=${symbol}&interval=1h&limit=24`, { headers }),
-      fetch(`${COINGLASS_BASE}/api/futures/liquidation/map?exchange=Binance&symbol=${symbol}`, { headers }),
-    ]);
-    const histJson = await histRes.json();
-    const mapJson = await mapRes.json();
-    if(histJson.code !== '0' || mapJson.code !== '0'){
-      throw new Error(histJson.msg || mapJson.msg || '接口返回错误');
-    }
-
-    // 24h long vs short liquidation totals
-    const rows = histJson.data || [];
-    let longTotal = 0, shortTotal = 0;
-    rows.forEach(r => {
-      longTotal += Number(pick(r, ['longLiquidationUsd','long_liquidation_usd','longVolUsd'], 0));
-      shortTotal += Number(pick(r, ['shortLiquidationUsd','short_liquidation_usd','shortVolUsd'], 0));
-    });
-
-    // Liquidation map: price -> clustered size
-    const raw = (mapJson.data && mapJson.data.data) || {};
-    const priceLevels = Object.keys(raw).map(priceKey => {
-      const entries = raw[priceKey];
-      const total = (entries || []).reduce((s,e) => s + Number(e[1] || 0), 0);
-      return { price: Number(priceKey), total };
-    }).filter(p => p.total > 0);
-
+    const details = await fetchLiquidations(uly);
     const currentPrice = parseFloat(document.querySelector('.price-main')?.textContent.replace(/,/g,'')) || null;
 
-    if(priceLevels.length === 0 && longTotal === 0 && shortTotal === 0){
-      el.innerHTML = '<div class="liq-empty">暂无清算数据，稍后重试。</div>';
+    if(details.length === 0){
+      el.innerHTML = '<div class="liq-empty">近期没有强平订单数据。</div>';
       return;
     }
 
-    let mapHtml = '<div class="liq-empty">价格区间清算数据暂不可用。</div>';
-    if(priceLevels.length > 0 && currentPrice){
-      const nearby = priceLevels
-        .filter(p => Math.abs(p.price - currentPrice) / currentPrice <= 0.08)
-        .sort((a,b) => b.price - a.price)
-        .slice(0, 16);
-      const maxTotal = Math.max(...nearby.map(p => p.total), 1);
-      const dd = decimals(state.name);
-      mapHtml = nearby.map(p => {
-        const side = p.price >= currentPrice ? 'above' : 'below';
-        const width = Math.max(4, (p.total / maxTotal) * 100);
-        return `
-          <div class="liq-row">
-            <div class="liq-price">${fmt(p.price, dd)}</div>
-            <div class="liq-bar-track"><div class="liq-bar ${side}" style="width:${width}%"></div></div>
-          </div>
-        `;
-      }).join('');
-      mapHtml += `<div class="liq-cur">现价 ${fmt(currentPrice, dd)}</div>`;
+    let longTotal = 0, shortTotal = 0;
+    details.forEach(d => {
+      const px = Number(d.bkPx || 0);
+      const notional = Number(d.sz || 0) * px;
+      const posSide = d.posSide || (d.side === 'sell' ? 'long' : 'short');
+      if(posSide === 'long') longTotal += notional; else shortTotal += notional;
+    });
+
+    let mapHtml = '<div class="liq-empty">价格区间强平数据暂不可用。</div>';
+    if(currentPrice){
+      const bucketSize = currentPrice * 0.001;
+      const buckets = {};
+      details.forEach(d => {
+        const px = Number(d.bkPx || 0);
+        if(!px || Math.abs(px - currentPrice) / currentPrice > 0.08) return;
+        const key = Math.round(px / bucketSize) * bucketSize;
+        const notional = Number(d.sz || 0) * px;
+        const posSide = d.posSide || (d.side === 'sell' ? 'long' : 'short');
+        if(!buckets[key]) buckets[key] = { price: key, long: 0, short: 0 };
+        buckets[key][posSide] += notional;
+      });
+      const bucketList = Object.values(buckets)
+        .map(b => ({ ...b, total: b.long + b.short }))
+        .sort((a,b) => b.total - a.total)
+        .slice(0, 16)
+        .sort((a,b) => b.price - a.price);
+      if(bucketList.length > 0){
+        const maxTotal = Math.max(...bucketList.map(b => b.total), 1);
+        const dd = decimals(state.name);
+        mapHtml = bucketList.map(b => {
+          const side = b.long >= b.short ? 'below' : 'above';
+          const width = Math.max(4, (b.total / maxTotal) * 100);
+          return `
+            <div class="liq-row">
+              <div class="liq-price">${fmt(b.price, dd)}</div>
+              <div class="liq-bar-track"><div class="liq-bar ${side}" style="width:${width}%"></div></div>
+            </div>
+          `;
+        }).join('');
+        mapHtml += `<div class="liq-cur">现价 ${fmt(currentPrice, dd)}</div>`;
+      } else {
+        mapHtml = '<div class="liq-empty">现价附近±8%区间暂无强平记录。</div>';
+      }
     }
 
     el.innerHTML = `
       <div class="liq-summary">
-        <div class="liq-stat"><div class="k">24h多头爆仓</div><div class="v long">$${fmtUsd(longTotal)}</div></div>
-        <div class="liq-stat"><div class="k">24h空头爆仓</div><div class="v short">$${fmtUsd(shortTotal)}</div></div>
+        <div class="liq-stat"><div class="k">近100笔多头强平</div><div class="v long">$${fmtUsd(longTotal)}</div></div>
+        <div class="liq-stat"><div class="k">近100笔空头强平</div><div class="v short">$${fmtUsd(shortTotal)}</div></div>
       </div>
       ${mapHtml}
       <div class="liq-legend">
-        <span><i class="below"></i>现价下方（多头清算区）</span>
-        <span><i class="above"></i>现价上方（空头清算区）</span>
+        <span><i class="below"></i>多头强平占多的价位</span>
+        <span><i class="above"></i>空头强平占多的价位</span>
       </div>
     `;
   } catch(err){
-    el.innerHTML = `<div class="liq-empty">清算数据加载失败：${err.message}。如果一直失败，可能是接口对浏览器直连有限制（CORS），把这个错误发我看看。</div>`;
+    el.innerHTML = `<div class="liq-empty">清算数据加载失败：${err.message}。</div>`;
   }
 }
+
 
 const NEWS_FEEDS = [
   { url: 'https://cointelegraph.com/rss', name: 'Cointelegraph' },
@@ -677,7 +682,7 @@ async function loadNews(){
 }
 
 function resetCountdown(){
-  state.countdown = 10;
+  state.countdown = 5;
   document.getElementById('countdown').textContent = `下次刷新 ${state.countdown}s`;
 }
 
@@ -715,7 +720,7 @@ loadData().then(loadLiquidation);
 loadNews();
 startTimer();
 setInterval(loadNews, 5 * 60 * 1000);
-setInterval(loadLiquidation, 60 * 1000);
+setInterval(loadLiquidation, 60 * 60 * 1000);
 </script>
 </body>
 </html>
