@@ -179,6 +179,9 @@
   .tag.pos{ color: var(--pos); background: rgba(52,211,153,0.1); }
   .tag.neg{ color: var(--neg); background: rgba(251,113,133,0.1); }
   .tag.neu{ color: var(--text-dim); background: rgba(137,147,172,0.1); }
+  .stars{ font-size:11px; letter-spacing:1px; }
+  .stars.pos{ color: var(--pos); }
+  .stars.neg{ color: var(--neg); }
   .news-time{ color: var(--text-dim); font-size:11px; font-family:'IBM Plex Mono', monospace; }
   .news-empty{ color: var(--text-dim); font-size:12.5px; padding: 6px 0; }
 
@@ -215,7 +218,7 @@
 
   <div class="chart-card">
     <div class="chart-head">
-      <div class="label">K线图 · EMA20 / EMA60 随分析同步</div>
+      <div class="label">K线图 · EMA20 / EMA60 / 成交量 随分析同步</div>
       <div class="chart-tfs" id="chartTfs">
         <button class="chart-tf" data-tf="1m">1m</button>
         <button class="chart-tf" data-tf="5m">5m</button>
@@ -237,6 +240,16 @@
     <div id="liqContent"><div class="liq-empty">正在加载清算数据…</div></div>
   </div>
 
+  <div class="liq-card">
+    <div class="label">盘口挂单 · OKX 实时深度</div>
+    <div id="obContent"><div class="liq-empty">正在加载盘口数据…</div></div>
+  </div>
+
+  <div class="liq-card">
+    <div class="label">情绪指标 · OKX 衍生品数据</div>
+    <div id="sentContent"><div class="liq-empty">正在加载情绪指标…</div></div>
+  </div>
+
   <div class="news-card">
     <div class="news-head">
       <div class="label">消息面快报</div>
@@ -254,7 +267,7 @@
 const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 3, chartTf: '15m', periodsByLabel: {} };
 const OKX_BASE = 'https://www.okx.com';
 
-let chart = null, candleSeries = null, emaFastSeries = null, emaSlowSeries = null;
+let chart = null, candleSeries = null, emaFastSeries = null, emaSlowSeries = null, volumeSeries = null;
 
 function ensureChart(){
   if(chart) return;
@@ -274,6 +287,10 @@ function ensureChart(){
   });
   emaFastSeries = chart.addLineSeries({ color: '#8b9bff', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
   emaSlowSeries = chart.addLineSeries({ color: '#f2a93b', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+  volumeSeries = chart.addHistogramSeries({
+    priceFormat: { type: 'volume' }, priceScaleId: '',
+    scaleMargins: { top: 0.82, bottom: 0 }
+  });
   window.addEventListener('resize', () => {
     if(chart) chart.applyOptions({ width: container.clientWidth });
   });
@@ -289,6 +306,10 @@ function renderChart(candles){
   const e60 = emaSeries(closes, 60);
   emaFastSeries.setData(times.map((t,i) => ({ time: t, value: e20[i] })));
   emaSlowSeries.setData(times.map((t,i) => ({ time: t, value: e60[i] })));
+  volumeSeries.setData(candles.map((c,i) => ({
+    time: times[i], value: c.volume || 0,
+    color: c.close >= c.open ? 'rgba(52,211,153,0.5)' : 'rgba(251,113,133,0.5)'
+  })));
   chart.timeScale().fitContent();
 }
 
@@ -388,7 +409,7 @@ async function fetchCandles(instId, bar, limit){
   const json = await res.json();
   if(json.code !== '0') throw new Error(json.msg || 'candles error');
   return json.data.reverse().map(d => ({
-    time: +d[0], open: +d[1], high: +d[2], low: +d[3], close: +d[4]
+    time: +d[0], open: +d[1], high: +d[2], low: +d[3], close: +d[4], volume: +d[5]
   }));
 }
 
@@ -410,6 +431,7 @@ function aggregate(candles, groupSize){
       close: group[group.length-1].close,
       high: Math.max(...group.map(c=>c.high)),
       low: Math.min(...group.map(c=>c.low)),
+      volume: group.reduce((s,c)=>s+(c.volume||0),0),
     });
   }
   return out;
@@ -568,10 +590,15 @@ async function loadData(){
     if(score >= threshold){ overall='long'; overallLabel='做多'; }
     else if(score <= -threshold){ overall='short'; overallLabel='做空'; }
 
-    const rsi5 = periods[1].m.rsi;
-    let up = 50 + (rsi5-50)*0.35 + score*3;
-    up = Math.max(8, Math.min(92, up));
-    const down = 100 - up;
+    const rsi15 = periods[2].m.rsi;
+    let up15 = 50 + (rsi15-50)*0.35 + score*3;
+    up15 = Math.max(8, Math.min(92, up15));
+    const down15 = 100 - up15;
+
+    const rsi1h = periods[4].m.rsi;
+    let up1h = 50 + (rsi1h-50)*0.35 + score*3;
+    up1h = Math.max(8, Math.min(92, up1h));
+    const down1h = 100 - up1h;
 
     const last = parseFloat(ticker.last);
     const open24h = parseFloat(ticker.open24h);
@@ -585,7 +612,7 @@ async function loadData(){
     const winRate = backtest ? backtest.rate : null;
     const winRateCls = winRate === null ? 'mid' : winRate >= 55 ? 'high' : winRate >= 45 ? 'mid' : 'low';
 
-    const strategy = buildStrategy(score, periodCount, last, k5m, name, rsi5);
+    const strategy = buildStrategy(score, periodCount, last, k5m, name, periods[1].m.rsi);
 
     const now = new Date();
     const timeStr = now.toLocaleTimeString('zh-CN', {hour12:false});
@@ -609,14 +636,23 @@ async function loadData(){
       </div>
 
       <div class="gauge-card">
-        <div class="label">下一个 5 分钟倾向</div>
+        <div class="label">下一个 15 分钟倾向</div>
         <div class="gauge-track">
-          <div class="gauge-up" style="width:${up}%"></div>
-          <div class="gauge-down" style="width:${down}%"></div>
+          <div class="gauge-up" style="width:${up15}%"></div>
+          <div class="gauge-down" style="width:${down15}%"></div>
         </div>
         <div class="gauge-labels">
-          <span class="u">上涨倾向 ${up.toFixed(0)}%</span>
-          <span class="d">下跌倾向 ${down.toFixed(0)}%</span>
+          <span class="u">上涨倾向 ${up15.toFixed(0)}%</span>
+          <span class="d">下跌倾向 ${down15.toFixed(0)}%</span>
+        </div>
+        <div class="label" style="margin-top:16px;">下一个 1 小时倾向</div>
+        <div class="gauge-track">
+          <div class="gauge-up" style="width:${up1h}%"></div>
+          <div class="gauge-down" style="width:${down1h}%"></div>
+        </div>
+        <div class="gauge-labels">
+          <span class="u">上涨倾向 ${up1h.toFixed(0)}%</span>
+          <span class="d">下跌倾向 ${down1h.toFixed(0)}%</span>
         </div>
       </div>
 
@@ -761,22 +797,110 @@ async function loadLiquidation(){
 
 
 const RSS2JSON_KEY = 'xsew77fe5bkimhm5sgaghhi9po7y8tzhnsokh4lg';
+async function fetchOrderBook(instId){
+  const res = await fetch(`${OKX_BASE}/api/v5/market/books?instId=${instId}&sz=40`);
+  if(!res.ok) throw new Error('book request failed');
+  const json = await res.json();
+  if(json.code !== '0') throw new Error(json.msg || 'book error');
+  return json.data[0];
+}
+
+function renderBookSide(levels, side, maxSize, dd){
+  return levels.map(([px,sz]) => {
+    const p = Number(px), s = Number(sz);
+    const width = Math.max(4, (s / maxSize) * 100);
+    return `
+      <div class="liq-row">
+        <div class="liq-price">${fmt(p,dd)}</div>
+        <div class="liq-bar-track"><div class="liq-bar ${side}" style="width:${width}%"></div></div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function loadOrderBook(){
+  const el = document.getElementById('obContent');
+  try{
+    const book = await fetchOrderBook(state.inst);
+    const dd = decimals(state.name);
+    const asks = book.asks.slice(0,10).map(a => [a[0], a[1]]).reverse();
+    const bids = book.bids.slice(0,10).map(b => [b[0], b[1]]);
+    const maxSize = Math.max(...[...asks,...bids].map(x => Number(x[1])), 1);
+    const mid = (Number(book.asks[0][0]) + Number(book.bids[0][0])) / 2;
+    el.innerHTML = `
+      <div class="liq-empty">卖盘 Top10（挂单量）</div>
+      ${renderBookSide(asks, 'above', maxSize, dd)}
+      <div class="liq-cur">中间价 ${fmt(mid, dd)}</div>
+      <div class="liq-empty">买盘 Top10（挂单量）</div>
+      ${renderBookSide(bids, 'below', maxSize, dd)}
+    `;
+  } catch(err){
+    el.innerHTML = `<div class="liq-empty">盘口数据加载失败：${err.message}。</div>`;
+  }
+}
+
+async function loadSentiment(){
+  const el = document.getElementById('sentContent');
+  const results = await Promise.allSettled([
+    fetch(`${OKX_BASE}/api/v5/public/funding-rate?instId=${state.inst}`).then(r=>r.json()),
+    fetch(`${OKX_BASE}/api/v5/public/open-interest?instId=${state.inst}`).then(r=>r.json()),
+    fetch(`${OKX_BASE}/api/v5/rubik/stat/contracts/long-short-account-ratio-contract?instId=${state.inst}&period=5m`).then(r=>r.json()),
+  ]);
+
+  let fundingHtml = '—', oiHtml = '—', ratioHtml = '—';
+  if(results[0].status === 'fulfilled' && results[0].value.code === '0'){
+    const rate = Number(results[0].value.data[0].fundingRate) * 100;
+    fundingHtml = `${rate>=0?'+':''}${rate.toFixed(4)}%`;
+  }
+  if(results[1].status === 'fulfilled' && results[1].value.code === '0'){
+    const oi = Number(results[1].value.data[0].oiCcy);
+    oiHtml = `${fmtUsd(oi)} ${state.name}`;
+  }
+  if(results[2].status === 'fulfilled' && results[2].value.code === '0' && results[2].value.data.length){
+    const ratio = Number(results[2].value.data[0][1]);
+    ratioHtml = ratio.toFixed(2);
+  }
+
+  const fundingCls = fundingHtml.startsWith('+') ? 'long' : fundingHtml.startsWith('-') ? 'short' : '';
+  const ratioCls = ratioHtml !== '—' ? (Number(ratioHtml) >= 1 ? 'long' : 'short') : '';
+
+  el.innerHTML = `
+    <div class="liq-summary">
+      <div class="liq-stat"><div class="k">资金费率</div><div class="v ${fundingCls}">${fundingHtml}</div></div>
+      <div class="liq-stat"><div class="k">未平仓量</div><div class="v">${oiHtml}</div></div>
+      <div class="liq-stat"><div class="k">多空人数比</div><div class="v ${ratioCls}">${ratioHtml}</div></div>
+    </div>
+    <div class="strategy-note">资金费率为正表示多头付费给空头（多头拥挤）；多空人数比大于1代表做多账户数更多。数据每分钟更新一次。</div>
+  `;
+}
+
 const NEWS_FEEDS = [
   { url: 'https://cointelegraph.com/rss', name: 'Cointelegraph' },
   { url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', name: 'CoinDesk' },
 ];
-const POS_WORDS = ['surge','rally','soar','bullish','approve','approval','record high','all-time high','adoption','inflow','breakout','upgrade','gain','jump','rebound'];
-const NEG_WORDS = ['crash','plunge','hack','exploit','ban','lawsuit','sell-off','selloff','bearish','fraud','collapse','outflow','fine','crackdown','liquidat','drop','fall','warn'];
+const POS_WORDS_STRONG = ['record high','all-time high','approval','approve'];
+const POS_WORDS_NORMAL = ['surge','rally','soar','bullish','adoption','inflow','breakout','upgrade','gain','jump','rebound'];
+const NEG_WORDS_STRONG = ['crash','hack','exploit','ban','fraud','collapse'];
+const NEG_WORDS_NORMAL = ['plunge','lawsuit','sell-off','selloff','bearish','outflow','fine','crackdown','liquidat','drop','fall','warn'];
 
 function classifyHeadline(title){
   const t = title.toLowerCase();
-  const pos = POS_WORDS.some(w => t.includes(w));
-  const neg = NEG_WORDS.some(w => t.includes(w));
-  if(pos && !neg) return 'pos';
-  if(neg && !pos) return 'neg';
-  return 'neu';
+  let posScore = 0, negScore = 0;
+  POS_WORDS_STRONG.forEach(w => { if(t.includes(w)) posScore += 2; });
+  POS_WORDS_NORMAL.forEach(w => { if(t.includes(w)) posScore += 1; });
+  NEG_WORDS_STRONG.forEach(w => { if(t.includes(w)) negScore += 2; });
+  NEG_WORDS_NORMAL.forEach(w => { if(t.includes(w)) negScore += 1; });
+  if(posScore > negScore) return { cls: 'pos', stars: Math.min(5, Math.max(1, Math.round(posScore))) };
+  if(negScore > posScore) return { cls: 'neg', stars: Math.min(5, Math.max(1, Math.round(negScore))) };
+  return { cls: 'neu', stars: 0 };
 }
 function tagLabel(c){ return c==='pos' ? '利多' : c==='neg' ? '利空' : '中性'; }
+function starHtml(cls, stars){
+  if(stars <= 0) return '';
+  const filled = '★'.repeat(stars);
+  const empty = '☆'.repeat(5-stars);
+  return `<span class="stars ${cls}">${filled}${empty}</span>`;
+}
 
 function timeAgo(dateStr){
   const diffMin = Math.max(0, Math.round((Date.now() - new Date(dateStr).getTime())/60000));
@@ -805,12 +929,13 @@ async function loadNews(){
     items.sort((a,b) => new Date(b.pubDate) - new Date(a.pubDate));
     items = items.slice(0, 8);
     listEl.innerHTML = items.map(it => {
-      const cls = classifyHeadline(it.title);
+      const { cls, stars } = classifyHeadline(it.title);
       return `
         <div class="news-item">
           <a href="${it.link}" target="_blank" rel="noopener">${it.title}</a>
           <div class="news-meta">
             <span class="tag ${cls}">${tagLabel(cls)}</span>
+            ${starHtml(cls, stars)}
             <span class="news-time">${it.source} · ${timeAgo(it.pubDate)}</span>
           </div>
         </div>
@@ -848,19 +973,25 @@ function switchTab(inst, name, accent){
   document.getElementById('content').innerHTML = '<div class="loading">正在加载行情数据…</div>';
   document.getElementById('liqContent').innerHTML = '<div class="liq-empty">正在加载清算数据…</div>';
   loadData().then(loadLiquidation);
+  loadOrderBook();
+  loadSentiment();
   startTimer();
 }
 
 document.getElementById('tabBTC').addEventListener('click', ()=> switchTab('BTC-USDT-SWAP','BTC','btc'));
 document.getElementById('tabETH').addEventListener('click', ()=> switchTab('ETH-USDT-SWAP','ETH','eth'));
 document.getElementById('tabZEC').addEventListener('click', ()=> switchTab('ZEC-USDT-SWAP','ZEC','zec'));
-document.getElementById('refreshBtn').addEventListener('click', ()=>{ loadData().then(loadLiquidation); loadNews(); resetCountdown(); });
+document.getElementById('refreshBtn').addEventListener('click', ()=>{ loadData().then(loadLiquidation); loadNews(); loadOrderBook(); resetCountdown(); });
 
 loadData().then(loadLiquidation);
 loadNews();
+loadOrderBook();
+loadSentiment();
 startTimer();
 setInterval(loadNews, 5 * 60 * 1000);
 setInterval(loadLiquidation, 60 * 60 * 1000);
+setInterval(loadOrderBook, 5 * 1000);
+setInterval(loadSentiment, 60 * 1000);
 </script>
 </body>
 </html>
