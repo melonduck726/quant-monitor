@@ -380,43 +380,47 @@ function findSwingLevels(candles, pivotSpan=2){
   return { lows, highs };
 }
 
-// Support/resistance based stop with a fixed 1:3 risk-reward.
+// Support/resistance based limit-order suggestion with a fixed 1:3 risk-reward.
+// Entry = nearby minor pullback level (tight pivot), stop = further major level (wide pivot).
 // Returns null when there's no clear multi-period direction — caller should
 // skip rendering the strategy card entirely in that case.
 function buildStrategy(overall, score, periodCount, price, k5m, name){
   if(overall === 'flat') return null;
 
   const d = decimals(name);
-  const { lows, highs } = findSwingLevels(k5m.slice(-80), 2);
-  const allLows = k5m.slice(-80).map(c=>c.low);
-  const allHighs = k5m.slice(-80).map(c=>c.high);
+  const recent40 = k5m.slice(-40);
+  const recent80 = k5m.slice(-80);
+  const minor = findSwingLevels(recent40, 1);   // tighter pivots → near-term pullback zone (entry)
+  const major = findSwingLevels(recent80, 3);   // wider pivots → structural level (stop)
 
   const confidence = Math.abs(score) >= Math.ceil(periodCount*0.66) ? '强' : '中';
 
   if(overall === 'long'){
-    const belowLows = lows.filter(l => l < price);
-    const support = belowLows.length ? Math.max(...belowLows) : Math.min(...allLows);
-    const distance = price - support;
-    const stop = support;
-    const target = price + distance * 3;
+    const minorLows = minor.lows.filter(l => l < price);
+    const entry = minorLows.length ? Math.max(...minorLows) : price;
+    const majorLows = major.lows.filter(l => l < entry);
+    const stop = majorLows.length ? Math.max(...majorLows) : Math.min(...recent80.map(c=>c.low));
+    const distance = entry - stop;
+    const target = entry + distance * 3;
     return {
       dir: 'long', dirLabel: '日内做多参考',
       confidence,
-      entry: fmt(price,d), stop: fmt(stop,d), target: fmt(target,d),
-      note: `止损参考最近支撑位，距离约 ${distance.toFixed(d)} 点；止盈按 1:3 盈亏比设在 ${fmt(target,d)}。多周期共振偏多 ${score}/${periodCount}，信号强度：${confidence}。`
+      entry: fmt(entry,d), stop: fmt(stop,d), target: fmt(target,d),
+      note: `建议挂限价单在 ${fmt(entry,d)} 附近的回踩支撑位，等回踩确认再进场，而不是现价追单。止损参考更下方的结构性支撑，距离约 ${distance.toFixed(d)} 点；止盈按 1:3 盈亏比设在 ${fmt(target,d)}。多周期共振偏多 ${score}/${periodCount}，信号强度：${confidence}。`
     };
   }
 
-  const aboveHighs = highs.filter(h => h > price);
-  const resistance = aboveHighs.length ? Math.min(...aboveHighs) : Math.max(...allHighs);
-  const distance = resistance - price;
-  const stop = resistance;
-  const target = price - distance * 3;
+  const minorHighs = minor.highs.filter(h => h > price);
+  const entry = minorHighs.length ? Math.min(...minorHighs) : price;
+  const majorHighs = major.highs.filter(h => h > entry);
+  const stop = majorHighs.length ? Math.min(...majorHighs) : Math.max(...recent80.map(c=>c.high));
+  const distance = stop - entry;
+  const target = entry - distance * 3;
   return {
     dir: 'short', dirLabel: '日内做空参考',
     confidence,
-    entry: fmt(price,d), stop: fmt(stop,d), target: fmt(target,d),
-    note: `止损参考最近压力位，距离约 ${distance.toFixed(d)} 点；止盈按 1:3 盈亏比设在 ${fmt(target,d)}。多周期共振偏空 ${score}/${periodCount}，信号强度：${confidence}。`
+    entry: fmt(entry,d), stop: fmt(stop,d), target: fmt(target,d),
+    note: `建议挂限价单在 ${fmt(entry,d)} 附近的反抽压力位，等反抽确认再进场，而不是现价追空。止损参考更上方的结构性压力，距离约 ${distance.toFixed(d)} 点；止盈按 1:3 盈亏比设在 ${fmt(target,d)}。多周期共振偏空 ${score}/${periodCount}，信号强度：${confidence}。`
   };
 }
 
@@ -514,7 +518,7 @@ async function loadData(){
           <div class="confidence">信号强度 · ${strategy.confidence}</div>
         </div>
         <div class="strategy-grid">
-          <div class="strategy-cell"><div class="k">入场参考</div><div class="v entry">${strategy.entry}</div></div>
+          <div class="strategy-cell"><div class="k">限价入场</div><div class="v entry">${strategy.entry}</div></div>
           <div class="strategy-cell"><div class="k">止损参考</div><div class="v stop">${strategy.stop}</div></div>
           <div class="strategy-cell"><div class="k">止盈参考（1:3）</div><div class="v target">${strategy.target}</div></div>
         </div>
