@@ -213,7 +213,7 @@
 
   <div class="refresh-row">
     <button class="refresh-btn" id="refreshBtn">立即刷新</button>
-    <div class="countdown" id="countdown">下次刷新 3s</div>
+    <div class="countdown" id="countdown">下次刷新 2s</div>
   </div>
 
   <div class="chart-card">
@@ -264,7 +264,7 @@
 </div>
 
 <script>
-const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 3, chartTf: '15m', periodsByLabel: {} };
+const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 2, chartTf: '15m', periodsByLabel: {} };
 const OKX_BASE = 'https://www.okx.com';
 
 let chart = null, candleSeries = null, emaFastSeries = null, emaSlowSeries = null, volumeSeries = null;
@@ -798,20 +798,33 @@ async function loadLiquidation(){
 
 const RSS2JSON_KEY = 'xsew77fe5bkimhm5sgaghhi9po7y8tzhnsokh4lg';
 async function fetchOrderBook(instId){
-  const res = await fetch(`${OKX_BASE}/api/v5/market/books?instId=${instId}&sz=40`);
+  const res = await fetch(`${OKX_BASE}/api/v5/market/books?instId=${instId}&sz=400`);
   if(!res.ok) throw new Error('book request failed');
   const json = await res.json();
   if(json.code !== '0') throw new Error(json.msg || 'book error');
   return json.data[0];
 }
 
+// Group raw tick-level order book entries into wider price buckets so the
+// depth view shows meaningful clusters instead of every individual price tick.
+const BOOK_BUCKET_PCT = 0.0015; // ~0.15% of price per bucket
+function bucketBookSide(levels, bucketSize){
+  const buckets = {};
+  levels.forEach(([px,sz]) => {
+    const p = Number(px), s = Number(sz);
+    if(!p || !s) return;
+    const key = Math.round(p / bucketSize) * bucketSize;
+    buckets[key] = (buckets[key] || 0) + s;
+  });
+  return Object.entries(buckets).map(([k,v]) => [Number(k), v]);
+}
+
 function renderBookSide(levels, side, maxSize, dd){
   return levels.map(([px,sz]) => {
-    const p = Number(px), s = Number(sz);
-    const width = Math.max(4, (s / maxSize) * 100);
+    const width = Math.max(4, (sz / maxSize) * 100);
     return `
       <div class="liq-row">
-        <div class="liq-price">${fmt(p,dd)}</div>
+        <div class="liq-price">${fmt(px,dd)}</div>
         <div class="liq-bar-track"><div class="liq-bar ${side}" style="width:${width}%"></div></div>
       </div>
     `;
@@ -823,16 +836,21 @@ async function loadOrderBook(){
   try{
     const book = await fetchOrderBook(state.inst);
     const dd = decimals(state.name);
-    const asks = book.asks.slice(0,10).map(a => [a[0], a[1]]).reverse();
-    const bids = book.bids.slice(0,10).map(b => [b[0], b[1]]);
-    const maxSize = Math.max(...[...asks,...bids].map(x => Number(x[1])), 1);
     const mid = (Number(book.asks[0][0]) + Number(book.bids[0][0])) / 2;
+    const bucketSize = mid * BOOK_BUCKET_PCT;
+
+    const askBuckets = bucketBookSide(book.asks, bucketSize)
+      .sort((a,b) => a[0]-b[0]).slice(0, 12).reverse();
+    const bidBuckets = bucketBookSide(book.bids, bucketSize)
+      .sort((a,b) => b[0]-a[0]).slice(0, 12);
+
+    const maxSize = Math.max(...[...askBuckets,...bidBuckets].map(x => x[1]), 1);
     el.innerHTML = `
-      <div class="liq-empty">卖盘 Top10（挂单量）</div>
-      ${renderBookSide(asks, 'above', maxSize, dd)}
+      <div class="liq-empty">卖盘（按约 ${(BOOK_BUCKET_PCT*100).toFixed(2)}% 价位聚合）</div>
+      ${renderBookSide(askBuckets, 'above', maxSize, dd)}
       <div class="liq-cur">中间价 ${fmt(mid, dd)}</div>
-      <div class="liq-empty">买盘 Top10（挂单量）</div>
-      ${renderBookSide(bids, 'below', maxSize, dd)}
+      <div class="liq-empty">买盘（按约 ${(BOOK_BUCKET_PCT*100).toFixed(2)}% 价位聚合）</div>
+      ${renderBookSide(bidBuckets, 'below', maxSize, dd)}
     `;
   } catch(err){
     el.innerHTML = `<div class="liq-empty">盘口数据加载失败：${err.message}。</div>`;
@@ -947,7 +965,7 @@ async function loadNews(){
 }
 
 function resetCountdown(){
-  state.countdown = 3;
+  state.countdown = 2;
   document.getElementById('countdown').textContent = `下次刷新 ${state.countdown}s`;
 }
 
@@ -988,7 +1006,7 @@ loadNews();
 loadOrderBook();
 loadSentiment();
 startTimer();
-setInterval(loadNews, 5 * 60 * 1000);
+setInterval(loadNews, 10 * 1000);
 setInterval(loadLiquidation, 60 * 60 * 1000);
 setInterval(loadOrderBook, 5 * 1000);
 setInterval(loadSentiment, 60 * 1000);
