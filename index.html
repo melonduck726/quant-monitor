@@ -194,7 +194,7 @@
 
   <div class="refresh-row">
     <button class="refresh-btn" id="refreshBtn">立即刷新</button>
-    <div class="countdown" id="countdown">下次刷新 5s</div>
+    <div class="countdown" id="countdown">下次刷新 3s</div>
   </div>
 
   <div id="content">
@@ -220,7 +220,7 @@
 </div>
 
 <script>
-const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 5 };
+const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 3 };
 const OKX_BASE = 'https://www.okx.com';
 
 function emaSeries(values, period){
@@ -364,34 +364,59 @@ function backtestWinRate(candles, lookback=100){
   return { rate: wins/total*100, sample: total };
 }
 
-function buildStrategy(overall, score, periodCount, price, atr15, name){
-  const d = decimals(name);
-  if(overall === 'flat'){
-    return {
-      dir: 'flat', dirLabel: '观望',
-      confidence: '弱',
-      entry: '—', stop: '—', target: '—',
-      note: `当前 ${periodCount} 个周期信号不一致，未形成有效共振，建议等待方向明朗后再考虑入场。`
-    };
+function findSwingLevels(candles, pivotSpan=2){
+  const lows = [], highs = [];
+  for(let i=pivotSpan;i<candles.length-pivotSpan;i++){
+    const c = candles[i];
+    let isLow=true, isHigh=true;
+    for(let j=i-pivotSpan;j<=i+pivotSpan;j++){
+      if(j===i) continue;
+      if(candles[j].low <= c.low) isLow=false;
+      if(candles[j].high >= c.high) isHigh=false;
+    }
+    if(isLow) lows.push(c.low);
+    if(isHigh) highs.push(c.high);
   }
+  return { lows, highs };
+}
+
+// Support/resistance based stop with a fixed 1:3 risk-reward.
+// Returns null when there's no clear multi-period direction — caller should
+// skip rendering the strategy card entirely in that case.
+function buildStrategy(overall, score, periodCount, price, k5m, name){
+  if(overall === 'flat') return null;
+
+  const d = decimals(name);
+  const { lows, highs } = findSwingLevels(k5m.slice(-80), 2);
+  const allLows = k5m.slice(-80).map(c=>c.low);
+  const allHighs = k5m.slice(-80).map(c=>c.high);
+
   const confidence = Math.abs(score) >= Math.ceil(periodCount*0.66) ? '强' : '中';
+
   if(overall === 'long'){
-    const stop = price - 1.2*atr15;
-    const target = price + 2.4*atr15;
+    const belowLows = lows.filter(l => l < price);
+    const support = belowLows.length ? Math.max(...belowLows) : Math.min(...allLows);
+    const distance = price - support;
+    const stop = support;
+    const target = price + distance * 3;
     return {
-      dir: 'long', dirLabel: '做多参考',
+      dir: 'long', dirLabel: '日内做多参考',
       confidence,
       entry: fmt(price,d), stop: fmt(stop,d), target: fmt(target,d),
-      note: `止损参考 1.2×ATR14，止盈参考 2.4×ATR14（风险回报约 1:2）。多周期共振偏多 ${score}/${periodCount}，信号强度：${confidence}。`
+      note: `止损参考最近支撑位，距离约 ${distance.toFixed(d)} 点；止盈按 1:3 盈亏比设在 ${fmt(target,d)}。多周期共振偏多 ${score}/${periodCount}，信号强度：${confidence}。`
     };
   }
-  const stop = price + 1.2*atr15;
-  const target = price - 2.4*atr15;
+
+  const aboveHighs = highs.filter(h => h > price);
+  const resistance = aboveHighs.length ? Math.min(...aboveHighs) : Math.max(...allHighs);
+  const distance = resistance - price;
+  const stop = resistance;
+  const target = price - distance * 3;
   return {
-    dir: 'short', dirLabel: '做空参考',
+    dir: 'short', dirLabel: '日内做空参考',
     confidence,
     entry: fmt(price,d), stop: fmt(stop,d), target: fmt(target,d),
-    note: `止损参考 1.2×ATR14，止盈参考 2.4×ATR14（风险回报约 1:2）。多周期共振偏空 ${score}/${periodCount}，信号强度：${confidence}。`
+    note: `止损参考最近压力位，距离约 ${distance.toFixed(d)} 点；止盈按 1:3 盈亏比设在 ${fmt(target,d)}。多周期共振偏空 ${score}/${periodCount}，信号强度：${confidence}。`
   };
 }
 
@@ -446,7 +471,7 @@ async function loadData(){
     const winRate = backtest ? backtest.rate : null;
     const winRateCls = winRate === null ? 'mid' : winRate >= 55 ? 'high' : winRate >= 45 ? 'mid' : 'low';
 
-    const strategy = buildStrategy(overall, score, periodCount, last, periods[0].m.atr, name);
+    const strategy = buildStrategy(overall, score, periodCount, last, k5m, name);
 
     const now = new Date();
     const timeStr = now.toLocaleTimeString('zh-CN', {hour12:false});
@@ -481,6 +506,7 @@ async function loadData(){
         </div>
       </div>
 
+      ${strategy ? `
       <div class="strategy-card">
         <div class="label">实时策略</div>
         <div class="strategy-head">
@@ -490,7 +516,7 @@ async function loadData(){
         <div class="strategy-grid">
           <div class="strategy-cell"><div class="k">入场参考</div><div class="v entry">${strategy.entry}</div></div>
           <div class="strategy-cell"><div class="k">止损参考</div><div class="v stop">${strategy.stop}</div></div>
-          <div class="strategy-cell"><div class="k">止盈参考</div><div class="v target">${strategy.target}</div></div>
+          <div class="strategy-cell"><div class="k">止盈参考（1:3）</div><div class="v target">${strategy.target}</div></div>
         </div>
         <div class="winrate-row">
           <div class="k">预测胜率（5m 规则回测）<span class="sample">${backtest ? `近 ${backtest.sample} 次同类信号` : '样本不足'}</span></div>
@@ -498,6 +524,7 @@ async function loadData(){
         </div>
         <div class="strategy-note">${strategy.note}</div>
       </div>
+      ` : ''}
 
       <div class="table-card">
         <div class="label">多周期指标 · 45m 由 15m 聚合计算</div>
@@ -682,7 +709,7 @@ async function loadNews(){
 }
 
 function resetCountdown(){
-  state.countdown = 5;
+  state.countdown = 3;
   document.getElementById('countdown').textContent = `下次刷新 ${state.countdown}s`;
 }
 
