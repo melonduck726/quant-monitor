@@ -6,6 +6,7 @@
 <title>BTC / ETH / ZEC 多周期实时监测</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root{
     --bg: #0a0e1a;
@@ -124,6 +125,21 @@
   .winrate-row .v.low{ color: var(--neg); }
   .strategy-note{ color: var(--text-dim); font-size:12px; line-height:1.7; }
 
+  .chart-card{
+    background: var(--surface); border:1px solid var(--border); border-radius: 14px;
+    padding: 16px 16px 8px; margin-bottom: 14px;
+  }
+  .chart-head{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
+  .chart-head .label{ color: var(--text-dim); font-size:12.5px; }
+  .chart-tfs{ display:flex; gap:4px; }
+  .chart-tf{
+    font-family:'IBM Plex Mono', monospace; font-size:11px; color: var(--text-dim);
+    background: var(--surface-2); border:1px solid var(--border); border-radius:6px;
+    padding: 4px 8px; cursor:pointer;
+  }
+  .chart-tf.active{ color: var(--eth); border-color: var(--eth); background: rgba(139,155,255,0.12); }
+  #chartContainer{ width:100%; height:240px; }
+
   .liq-card{
     background: var(--surface); border:1px solid var(--border); border-radius: 14px;
     padding: 18px 20px; margin-bottom: 14px;
@@ -197,6 +213,21 @@
     <div class="countdown" id="countdown">下次刷新 3s</div>
   </div>
 
+  <div class="chart-card">
+    <div class="chart-head">
+      <div class="label">K线图 · EMA20 / EMA60 随分析同步</div>
+      <div class="chart-tfs" id="chartTfs">
+        <button class="chart-tf" data-tf="1m">1m</button>
+        <button class="chart-tf" data-tf="5m">5m</button>
+        <button class="chart-tf active" data-tf="15m">15m</button>
+        <button class="chart-tf" data-tf="45m">45m</button>
+        <button class="chart-tf" data-tf="1H">1H</button>
+        <button class="chart-tf" data-tf="4H">4H</button>
+      </div>
+    </div>
+    <div id="chartContainer"></div>
+  </div>
+
   <div id="content">
     <div class="loading">正在加载行情数据…</div>
   </div>
@@ -220,8 +251,56 @@
 </div>
 
 <script>
-const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 3 };
+const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 3, chartTf: '15m', periodsByLabel: {} };
 const OKX_BASE = 'https://www.okx.com';
+
+let chart = null, candleSeries = null, emaFastSeries = null, emaSlowSeries = null;
+
+function ensureChart(){
+  if(chart) return;
+  const container = document.getElementById('chartContainer');
+  chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: 240,
+    layout: { background: { color: 'transparent' }, textColor: '#8993ac', fontFamily: "'IBM Plex Mono', monospace" },
+    grid: { vertLines: { color: '#1a2138' }, horzLines: { color: '#1a2138' } },
+    rightPriceScale: { borderColor: '#232c47' },
+    timeScale: { borderColor: '#232c47', timeVisible: true, secondsVisible: false },
+    crosshair: { mode: 1 },
+  });
+  candleSeries = chart.addCandlestickSeries({
+    upColor: '#34d399', downColor: '#fb7185', borderVisible: false,
+    wickUpColor: '#34d399', wickDownColor: '#fb7185'
+  });
+  emaFastSeries = chart.addLineSeries({ color: '#8b9bff', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+  emaSlowSeries = chart.addLineSeries({ color: '#f2a93b', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+  window.addEventListener('resize', () => {
+    if(chart) chart.applyOptions({ width: container.clientWidth });
+  });
+}
+
+function renderChart(candles){
+  if(!candles || candles.length < 5) return;
+  ensureChart();
+  const times = candles.map(c => Math.floor(c.time/1000));
+  candleSeries.setData(candles.map((c,i) => ({ time: times[i], open:c.open, high:c.high, low:c.low, close:c.close })));
+  const closes = candles.map(c => c.close);
+  const e20 = emaSeries(closes, 20);
+  const e60 = emaSeries(closes, 60);
+  emaFastSeries.setData(times.map((t,i) => ({ time: t, value: e20[i] })));
+  emaSlowSeries.setData(times.map((t,i) => ({ time: t, value: e60[i] })));
+  chart.timeScale().fitContent();
+}
+
+function setChartTf(tf){
+  state.chartTf = tf;
+  document.querySelectorAll('.chart-tf').forEach(btn => btn.classList.toggle('active', btn.dataset.tf === tf));
+  if(state.periodsByLabel[tf]) renderChart(state.periodsByLabel[tf].candles);
+}
+document.getElementById('chartTfs').addEventListener('click', (e) => {
+  const btn = e.target.closest('.chart-tf');
+  if(btn) setChartTf(btn.dataset.tf);
+});
 
 function emaSeries(values, period){
   const k = 2/(period+1);
@@ -380,33 +459,61 @@ function findSwingLevels(candles, pivotSpan=2){
   return { lows, highs };
 }
 
+// Approximate average stop distance (% of entry price) observed across the
+// user's own recent OKX trade history (ETHUSDT, 50x, full margin) — used only
+// as a reference comparison line in the strategy note, not as a hard input.
+const HIST_AVG_STOP_PCT = 1.7;
+
+function strategyConfidence(score, periodCount){
+  const absScore = Math.abs(score);
+  if(absScore >= Math.ceil(periodCount*0.66)) return '强';
+  if(absScore >= Math.ceil(periodCount/2)) return '中';
+  return '弱';
+}
+
+function strategyDirection(score, rsi5){
+  if(score > 0) return 'long';
+  if(score < 0) return 'short';
+  return rsi5 >= 50 ? 'long' : 'short';
+}
+
 // Support/resistance based limit-order suggestion with a fixed 1:3 risk-reward.
 // Entry = nearby minor pullback level (tight pivot), stop = further major level (wide pivot).
-// Returns null when there's no clear multi-period direction — caller should
-// skip rendering the strategy card entirely in that case.
-function buildStrategy(overall, score, periodCount, price, k5m, name){
-  if(overall === 'flat') return null;
-
+// Always returns a suggestion (even when multi-period signal is weak/flat) — in
+// that case confidence is marked '弱' and the note says so, rather than hiding.
+function buildStrategy(score, periodCount, price, k5m, name, rsi5){
+  const dir = strategyDirection(score, rsi5);
+  const confidence = strategyConfidence(score, periodCount);
   const d = decimals(name);
   const recent40 = k5m.slice(-40);
   const recent80 = k5m.slice(-80);
   const minor = findSwingLevels(recent40, 1);   // tighter pivots → near-term pullback zone (entry)
   const major = findSwingLevels(recent80, 3);   // wider pivots → structural level (stop)
 
-  const confidence = Math.abs(score) >= Math.ceil(periodCount*0.66) ? '强' : '中';
+  const weakNote = confidence === '弱'
+    ? `当前 ${periodCount} 个周期还没有形成明确共振，方向仅按短周期动能给出参考，建议轻仓试探或观望为主。`
+    : '';
 
-  if(overall === 'long'){
+  function styleCompareNote(distancePct){
+    const diff = distancePct - HIST_AVG_STOP_PCT;
+    if(Math.abs(diff) <= 0.3) return `止损空间约 ${distancePct.toFixed(2)}%，和你历史平均约 ${HIST_AVG_STOP_PCT}% 的止损习惯接近。`;
+    if(diff > 0) return `止损空间约 ${distancePct.toFixed(2)}%，比你历史平均约 ${HIST_AVG_STOP_PCT}% 更宽，高杠杆下注意仓位别放太大。`;
+    return `止损空间约 ${distancePct.toFixed(2)}%，比你历史平均约 ${HIST_AVG_STOP_PCT}% 更紧，容易被扫损。`;
+  }
+
+  if(dir === 'long'){
     const minorLows = minor.lows.filter(l => l < price);
     const entry = minorLows.length ? Math.max(...minorLows) : price;
     const majorLows = major.lows.filter(l => l < entry);
     const stop = majorLows.length ? Math.max(...majorLows) : Math.min(...recent80.map(c=>c.low));
     const distance = entry - stop;
     const target = entry + distance * 3;
+    const distancePct = (distance / entry) * 100;
     return {
       dir: 'long', dirLabel: '日内做多参考',
       confidence,
       entry: fmt(entry,d), stop: fmt(stop,d), target: fmt(target,d),
-      note: `建议挂限价单在 ${fmt(entry,d)} 附近的回踩支撑位，等回踩确认再进场，而不是现价追单。止损参考更下方的结构性支撑，距离约 ${distance.toFixed(d)} 点；止盈按 1:3 盈亏比设在 ${fmt(target,d)}。多周期共振偏多 ${score}/${periodCount}，信号强度：${confidence}。`
+      note: `建议挂限价单在 ${fmt(entry,d)} 附近的回踩支撑位，等回踩确认再进场。止损参考更下方的结构性支撑，止盈按 1:3 盈亏比设在 ${fmt(target,d)}。${styleCompareNote(distancePct)} ${weakNote}`
     };
   }
 
@@ -416,11 +523,12 @@ function buildStrategy(overall, score, periodCount, price, k5m, name){
   const stop = majorHighs.length ? Math.min(...majorHighs) : Math.max(...recent80.map(c=>c.high));
   const distance = stop - entry;
   const target = entry - distance * 3;
+  const distancePct = (distance / entry) * 100;
   return {
     dir: 'short', dirLabel: '日内做空参考',
     confidence,
     entry: fmt(entry,d), stop: fmt(stop,d), target: fmt(target,d),
-    note: `建议挂限价单在 ${fmt(entry,d)} 附近的反抽压力位，等反抽确认再进场，而不是现价追空。止损参考更上方的结构性压力，距离约 ${distance.toFixed(d)} 点；止盈按 1:3 盈亏比设在 ${fmt(target,d)}。多周期共振偏空 ${score}/${periodCount}，信号强度：${confidence}。`
+    note: `建议挂限价单在 ${fmt(entry,d)} 附近的反抽压力位，等反抽确认再进场。止损参考更上方的结构性压力，止盈按 1:3 盈亏比设在 ${fmt(target,d)}。${styleCompareNote(distancePct)} ${weakNote}`
   };
 }
 
@@ -451,6 +559,8 @@ async function loadData(){
       return { ...p, m, d };
     });
     const periodCount = periods.length;
+    state.periodsByLabel = Object.fromEntries(periods.map(p => [p.label, p]));
+    renderChart(state.periodsByLabel[state.chartTf]?.candles);
 
     const score = periods.reduce((s,p)=> s + (p.d==='long'?1:p.d==='short'?-1:0), 0);
     const threshold = Math.ceil(periodCount/2);
@@ -475,7 +585,7 @@ async function loadData(){
     const winRate = backtest ? backtest.rate : null;
     const winRateCls = winRate === null ? 'mid' : winRate >= 55 ? 'high' : winRate >= 45 ? 'mid' : 'low';
 
-    const strategy = buildStrategy(overall, score, periodCount, last, k5m, name);
+    const strategy = buildStrategy(score, periodCount, last, k5m, name, rsi5);
 
     const now = new Date();
     const timeStr = now.toLocaleTimeString('zh-CN', {hour12:false});
@@ -510,7 +620,6 @@ async function loadData(){
         </div>
       </div>
 
-      ${strategy ? `
       <div class="strategy-card">
         <div class="label">实时策略</div>
         <div class="strategy-head">
@@ -528,7 +637,6 @@ async function loadData(){
         </div>
         <div class="strategy-note">${strategy.note}</div>
       </div>
-      ` : ''}
 
       <div class="table-card">
         <div class="label">多周期指标 · 45m 由 15m 聚合计算</div>
@@ -652,6 +760,7 @@ async function loadLiquidation(){
 }
 
 
+const RSS2JSON_KEY = 'xsew77fe5bkimhm5sgaghhi9po7y8tzhnsokh4lg';
 const NEWS_FEEDS = [
   { url: 'https://cointelegraph.com/rss', name: 'Cointelegraph' },
   { url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', name: 'CoinDesk' },
@@ -681,7 +790,7 @@ async function loadNews(){
   const listEl = document.getElementById('newsList');
   try{
     const results = await Promise.allSettled(NEWS_FEEDS.map(f =>
-      fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(f.url)}&count=6`)
+      fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(f.url)}&count=6&api_key=${RSS2JSON_KEY}`)
         .then(r => r.json())
         .then(json => (json.items||[]).map(it => ({
           title: it.title, link: it.link, pubDate: it.pubDate, source: f.name
