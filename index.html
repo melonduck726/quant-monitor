@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BTC / ETH / ZEC 多周期实时监测</title>
+<title>🐟 蓝色大肥鱼的量化面板喵～</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -196,6 +196,9 @@
   .winrate-row .v.high{ color: var(--pos); }
   .winrate-row .v.mid{ color: var(--neutral); }
   .winrate-row .v.low{ color: var(--neg); }
+  .hour-cell .r.high{ color: var(--pos); }
+  .hour-cell .r.mid{ color: var(--neutral); }
+  .hour-cell .r.low{ color: var(--neg); }
   .vp-line{
     font-size:14px; line-height:1.5; padding:10px 12px; border-radius:8px;
     background: var(--surface-2); border-left:3px solid var(--border); margin-bottom:8px;
@@ -234,6 +237,11 @@
   .liq-stat .v.risk-low{ color: var(--pos); }
   .liq-stat .v.risk-mid{ color: var(--neutral); }
   .liq-stat .v.risk-high{ color: var(--neg); }
+  .hour-grid{ display:grid; grid-template-columns: repeat(6,1fr); gap:6px; margin-bottom:10px; }
+  .hour-cell{ background: var(--surface-2); border-radius:8px; padding:7px 2px; text-align:center; }
+  .hour-cell .h{ font-size:10px; color: var(--text-dim); font-family:'IBM Plex Mono', monospace; }
+  .hour-cell .r{ font-family:'IBM Plex Mono', monospace; font-size:12px; font-weight:600; margin-top:2px; }
+  .hour-cell.insufficient .r{ color: var(--text-dim); }
   .divergence-alert{
     display:flex; align-items:flex-start; gap:8px; padding:10px 12px;
     border-radius:8px; margin-bottom:12px; font-size:13px; line-height:1.5;
@@ -292,8 +300,8 @@
 <div class="wrap">
   <div class="top">
     <div>
-      <h1>趋势镜</h1>
-      <div class="sub">看清趋势，再慢慢理解市场</div>
+      <h1>🐟 蓝色大肥鱼的量化面板喵～</h1>
+      <div class="sub">摸摸鱼，看看盘，再慢慢理解市场 ฅ^•ﻌ•^ฅ</div>
     </div>
     <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
       <div class="conn-status" id="connStatus"><i></i>连接中…</div>
@@ -428,6 +436,29 @@ function lastATR(candles, period=14){
   return last.reduce((a,b)=>a+b,0)/last.length;
 }
 
+// ATR at every bar (simple trailing mean, matches lastATR's method) — used to
+// place the current reading within its own recent distribution.
+function atrSeries(candles, period=14){
+  const out = new Array(candles.length).fill(null);
+  if(candles.length < period+1) return out;
+  const trs = [null];
+  for(let i=1;i<candles.length;i++){
+    const c = candles[i], p = candles[i-1];
+    trs.push(Math.max(c.high-c.low, Math.abs(c.high-p.close), Math.abs(c.low-p.close)));
+  }
+  for(let i=period;i<candles.length;i++){
+    let sum = 0;
+    for(let j=i-period+1;j<=i;j++) sum += trs[j];
+    out[i] = sum/period;
+  }
+  return out;
+}
+function percentileRank(arr, value){
+  const valid = arr.filter(v => v !== null && v !== undefined);
+  if(valid.length === 0) return 50;
+  return valid.filter(v => v < value).length / valid.length * 100;
+}
+
 function computeMetrics(candles){
   const closes = candles.map(c=>c.close);
   const e20 = emaSeries(closes,20);
@@ -524,7 +555,9 @@ function loadStratState(symbol){
 function saveStratState(symbol, state){
   try{
     if(state === null) localStorage.removeItem(`qm_stratState_${symbol}`);
-    else localStorage.setItem(`qm_stratState_${symbol}`, JSON.stringify(state));
+    // stampedAt lets cloud sync resolve which device's view of the live
+    // suggestion is the most recent one; without it devices silently diverge.
+    else localStorage.setItem(`qm_stratState_${symbol}`, JSON.stringify({ ...state, stampedAt: Date.now() }));
   } catch(e){ /* storage unavailable, tracking just won't persist */ }
 }
 function loadStratStats(symbol){
@@ -831,6 +864,14 @@ async function loadData(){
     const divergence = (vp15 && vp15.cls==='neu') || (vp1h && vp1h.cls==='neu');
     if(divergence) cautionNote += ' 当前已有量价背离迹象（涨/跌但量没跟上），信号可信度打折。';
 
+    // Volatility regime filter: where the current 15m ATR sits within its own
+    // recent distribution. Too low = a dead/ranging market where EMA/RSI/MACD
+    // whipsaw on noise; too high = likely a news spike where structure levels
+    // aren't reliable. Either way, skip issuing a fresh suggestion.
+    const atrPct = percentileRank(atrSeries(periods[2].candles, 14), atr15);
+    const volRegime = atrPct < 15 ? 'low' : atrPct > 90 ? 'high' : 'normal';
+    const VOL_REGIME_LABEL = { low: '波动率过低（横盘死水，指标易钝化）', high: '波动率过高（可能是突发行情，结构位不可靠）' };
+
     // Composite risk score: combines VWAP overextension + volume/price divergence
     // + OBV/price direction mismatch on both timeframes. Purely a heuristic tally
     // of the same signals already shown above, not a statistical probability.
@@ -868,21 +909,37 @@ async function loadData(){
     let stratStats = loadStratStats(name);
     let tradeLog = loadTradeLog(name);
 
+    // Anchor generation to the last CLOSED 5m candle rather than the live tick.
+    // Live price differs by a few dollars between devices, which was enough to
+    // produce a different entry/stop/target on each one; a closed candle is
+    // identical everywhere, so all devices derive the same suggestion.
+    const anchorPx = k5m.length >= 2 ? k5m[k5m.length-2].close : last;
     function freshSuggestion(){
-      const { dir, reversed } = determineEffectiveDirection(score, periods[1].m.rsi, riskScore, last, cautionUpper, cautionLower);
-      const built = buildStrategy(score, periodCount, last, k5m, k15, name, dir, reversed, periods[2].m.atr, vp15, vp1h);
-      const next = { ...built, status: 'pending', createdAt: Date.now() };
+      const { dir, reversed } = determineEffectiveDirection(score, periods[1].m.rsi, riskScore, anchorPx, cautionUpper, cautionLower);
+      const built = buildStrategy(score, periodCount, anchorPx, k5m, k15, name, dir, reversed, periods[2].m.atr, vp15, vp1h);
+      const anchorBar = k5m.length >= 2 ? k5m[k5m.length-2].time : Date.now();
+      const next = { ...built, status: 'pending', createdAt: Date.now(), anchorBar };
       saveStratState(name, next);
       return next;
     }
+    // Gate: don't issue a new suggestion at all while the volatility regime is
+    // extreme — park in 'volwait' instead, re-checked every cycle.
+    function trySuggest(){
+      if(volRegime !== 'normal'){
+        const next = { status: 'volwait', volRegime, atrPct, closedAt: Date.now() };
+        saveStratState(name, next);
+        return next;
+      }
+      return freshSuggestion();
+    }
 
     if(!stratState){
-      stratState = freshSuggestion();
+      stratState = trySuggest();
     } else if(stratState.status === 'pending'){
       const { dir: liveDir } = determineEffectiveDirection(score, periods[1].m.rsi, riskScore, last, cautionUpper, cautionLower);
       if(liveDir !== stratState.dir){
         // underlying thesis flipped before entry was ever hit — cancel and reissue
-        stratState = freshSuggestion();
+        stratState = trySuggest();
       } else {
         const missedToTarget = stratState.dir === 'long' ? last >= stratState.rawTarget : last <= stratState.rawTarget;
         const triggered = stratState.dir === 'long' ? last <= stratState.rawEntry : last >= stratState.rawEntry;
@@ -890,7 +947,7 @@ async function loadData(){
           // price ran straight to (or past) the take-profit level without ever
           // pulling back to fill the limit entry — nothing was ever actually
           // taken, so this doesn't count as a win/loss, just redeploy.
-          stratState = freshSuggestion();
+          stratState = trySuggest();
         } else if(triggered){
           stratState = {
             ...stratState, status: 'active', activatedAt: Date.now(),
@@ -967,18 +1024,31 @@ async function loadData(){
         saveStratState(name, stratState);
       }
     } else if(stratState.status === 'cooldown'){
-      if(isStabilized){
+      // Always sit out at least COOLDOWN_MS after a close (stop, target or
+      // manual cancel) before redeploying, on top of the stabilization gate.
+      const waited = Date.now() - (stratState.closedAt || 0);
+      if(waited >= COOLDOWN_MS && isStabilized){
+        stratState = trySuggest();
+      }
+    } else if(stratState.status === 'volwait'){
+      if(volRegime === 'normal'){
         stratState = freshSuggestion();
+      } else if(stratState.volRegime !== volRegime){
+        stratState = { ...stratState, volRegime, atrPct, closedAt: Date.now() };
+        saveStratState(name, stratState);
       }
     }
-    const strategy = stratState.status === 'cooldown' ? null : stratState;
+    const strategy = (stratState.status === 'cooldown' || stratState.status === 'volwait') ? null : stratState;
+    const cooldownLeftMs = stratState.status === 'cooldown'
+      ? Math.max(0, COOLDOWN_MS - (Date.now() - (stratState.closedAt || 0))) : 0;
     const stratWins = stratStats.wins || 0;
     const stratLosses = stratStats.losses || 0;
     const stratBreakevens = stratStats.breakevens || 0;
     const stratTotal = stratWins + stratLosses + stratBreakevens;
     const stratWinRate = (stratWins + stratLosses) > 0 ? (stratWins / (stratWins + stratLosses) * 100) : null;
     const REASON_LABEL = { target: '止盈到位', exhaustion: '动能衰竭提前止盈', trailed: '移动止损锁盈', breakeven: '保本出场', stop: '止损', cancelled: '手动取消' };
-    const statusLabel = !strategy ? '观望中，等待情绪与技术面企稳后再布局'
+    const statusLabel = stratState.status === 'volwait' ? `波动率异常，暂停出信号（ATR处于近期${atrPct.toFixed(0)}分位）`
+      : !strategy ? '观望中，等待情绪与技术面企稳后再布局'
       : strategy.status === 'active' ? `持仓中${strategy.stopStage==='trailing' ? '（止损已上移锁盈）' : strategy.stopStage==='breakeven' ? '（止损已移至保本位）' : ''}，等待触及止损/止盈`
       : '待入场，等待价格触达限价位';
 
@@ -998,6 +1068,22 @@ async function loadData(){
     const statsDay = windowStats(tradeLog, 24*60*60*1000);
     const statsWeek = windowStats(tradeLog, 7*24*60*60*1000);
     const statsMonth = windowStats(tradeLog, 30*24*60*60*1000);
+    // Win rate by hour-of-day (device local time), 24 buckets — surfaces
+    // whether this rule set actually has an edge in specific trading windows.
+    function hourlyStats(log){
+      const buckets = Array.from({length:24}, () => ({ wins:0, losses:0, breakevens:0 }));
+      log.forEach(t => {
+        const h = new Date(t.closedAt).getHours();
+        if(t.result === 'win') buckets[h].wins++;
+        else if(t.result === 'loss') buckets[h].losses++;
+        else if(t.result === 'breakeven') buckets[h].breakevens++;
+      });
+      return buckets.map((b, hour) => {
+        const total = b.wins + b.losses;
+        return { hour, ...b, total, rate: total > 0 ? (b.wins/total*100) : null };
+      });
+    }
+    const hourly = hourlyStats(tradeLog);
     const recentTrades = [...tradeLog].sort((a,b) => b.closedAt - a.closedAt).slice(0, 10);
     const acctCfg = loadAccountCfg();
     const equity = computeEquity(tradeLog, acctCfg);
@@ -1047,12 +1133,19 @@ async function loadData(){
 
       <div class="strategy-card">
         <div class="label">实时策略</div>
-        ${!strategy ? `
+        ${stratState.status === 'volwait' ? `
+        <div class="strategy-head">
+          <div class="strategy-dir flat">波动率异常，暂停信号</div>
+        </div>
+        <div class="status-badge cooldown">○ 观望中<span>${statusLabel}</span></div>
+        <div class="strategy-note">${VOL_REGIME_LABEL[volRegime] || VOL_REGIME_LABEL[stratState.volRegime] || ''}。当前15m ATR处于最近历史的第 <b>${atrPct.toFixed(0)}</b> 百分位（正常区间15-90）。${volRegime==='low' ? '行情太安静，EMA/RSI/MACD这类指标在窄幅震荡里容易反复打脸。' : volRegime==='high' ? '波动骤然放大，可能是突发消息行情，这时候找的支撑压力位不一定靠得住。'  : ''}等波动率回到正常区间再重新评估。</div>
+        ` : !strategy ? `
         <div class="strategy-head">
           <div class="strategy-dir flat">观望中</div>
         </div>
         <div class="status-badge cooldown">○ 观望中<span>${statusLabel}</span></div>
-        <div class="strategy-note">${stratState.lastReason === 'cancelled' ? '已手动取消策略（未计入胜负统计）' : `上一单${REASON_LABEL[stratState.lastReason] || (stratState.lastOutcome==='win'?'止盈':stratState.lastOutcome==='breakeven'?'保本':'止损')}平仓`}后进入观望，等多周期信号强度回到"中"或以上、且量价风险概率降到50以下再重新布局，避免刚止损/止盈完就立刻反手追进去。（当前：信号强度${strategyConfidence(score, periodCount)}，风险概率${riskScore}%）</div>
+        <div class="strategy-note">${stratState.lastReason === 'cancelled' ? '已手动取消策略（未计入胜负统计）' : `上一单${REASON_LABEL[stratState.lastReason] || (stratState.lastOutcome==='win'?'止盈':stratState.lastOutcome==='breakeven'?'保本':'止损')}平仓`}后进入观望，避免刚平完就立刻反手追进去。<br>
+          重新布局需同时满足两个条件：<b>①</b> 冷静期满 10 分钟 —— ${cooldownLeftMs > 0 ? `还剩 <b style="color:var(--neutral)">${Math.ceil(cooldownLeftMs/60000)} 分钟</b>` : '<b style="color:var(--pos)">已满足</b>'}；<b>②</b> 信号强度回到"中"或以上且风险概率低于50 —— 当前信号强度 <b>${strategyConfidence(score, periodCount)}</b>、风险概率 <b>${riskScore}%</b>，${(strategyConfidence(score, periodCount)!=='弱' && riskScore<=50) ? '<b style="color:var(--pos)">已满足</b>' : '<b style="color:var(--neutral)">尚未满足</b>'}。</div>
         ` : `
         <div class="strategy-head">
           <div class="strategy-dir ${strategy.dir}">${strategy.dirLabel}</div>
@@ -1090,6 +1183,33 @@ async function loadData(){
           <div class="liq-stat"><div class="k">近30天</div><div class="v ${statsMonth.rate===null?'mid':statsMonth.rate>=55?'high':statsMonth.rate>=45?'mid':'low'}">${statsMonth.rate===null?'—':statsMonth.rate.toFixed(0)+'%'}</div></div>
         </div>
         <div class="strategy-note" style="padding:0 6px;">近24小时 ${statsDay.wins}胜${statsDay.losses}负${statsDay.breakevens?`${statsDay.breakevens}保本`:''}，近7天 ${statsWeek.wins}胜${statsWeek.losses}负${statsWeek.breakevens?`${statsWeek.breakevens}保本`:''}，近30天 ${statsMonth.wins}胜${statsMonth.losses}负${statsMonth.breakevens?`${statsMonth.breakevens}保本`:''}。胜率不计保本单。样本积累需要时间，刚开始用的时候几个窗口都可能是"—"，正常。</div>
+      </div>
+
+      <div class="table-card">
+        <div class="label">按小时胜率分布 · ${name}（本机时区，0-23时）</div>
+        <div class="hour-grid">
+          ${hourly.map(h => {
+            const insufficient = h.total < 3;
+            const cls = insufficient ? 'mid' : h.rate>=55 ? 'high' : h.rate>=45 ? 'mid' : 'low';
+            return `
+              <div class="hour-cell ${insufficient?'insufficient':''}">
+                <div class="h">${String(h.hour).padStart(2,'0')}时</div>
+                <div class="r ${cls}">${h.rate===null?'—':h.rate.toFixed(0)+'%'}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+        ${(() => {
+          const enough = hourly.filter(h => h.total >= 3 && h.rate !== null);
+          if(enough.length === 0) return '<div class="strategy-note" style="padding:0 6px;">每个小时样本不足3单时不参与排名，暂时数据不够，先攒单。</div>';
+          const best = [...enough].sort((a,b)=>b.rate-a.rate).slice(0,3);
+          const worst = [...enough].sort((a,b)=>a.rate-b.rate).slice(0,3);
+          return `<div class="strategy-note" style="padding:0 6px;">
+            表现较好：${best.map(h=>`${String(h.hour).padStart(2,'0')}时(${h.rate.toFixed(0)}%，${h.total}单)`).join('、')}。
+            表现较弱：${worst.map(h=>`${String(h.hour).padStart(2,'0')}时(${h.rate.toFixed(0)}%，${h.total}单)`).join('、')}。
+            少于3单的时段不参与排名，灰色显示。这套规则是不是在特定时段更有优势，攒够样本后这里会看得出来。
+          </div>`;
+        })()}
       </div>
 
       <div class="table-card">
@@ -1765,7 +1885,23 @@ async function syncCloud(){
       const localLog  = loadTradeLog(sym);
       const remoteLog = (remote && remote[sym] && remote[sym].log) || [];
       const m = mergeLogs(localLog, remoteLog);
-      merged[sym] = { log: m, stats: statsFromLog(m) };
+
+      // Live suggestion: whichever device wrote most recently wins, so every
+      // device shows the same entry/stop/target instead of its own version.
+      const localState  = loadStratState(sym);
+      const remoteState = (remote && remote[sym] && remote[sym].state) || null;
+      const lt = (localState && localState.stampedAt) || 0;
+      const rt = (remoteState && remoteState.stampedAt) || 0;
+      let chosenState = localState;
+      if(rt > lt){
+        chosenState = remoteState;
+        try{ localStorage.setItem(`qm_stratState_${sym}`, JSON.stringify(remoteState)); } catch(e){}
+        localChanged = true;
+      } else if(lt > rt){
+        remoteStale = true;
+      }
+
+      merged[sym] = { log: m, stats: statsFromLog(m), state: chosenState };
       if(m.length !== localLog.length){
         saveTradeLog(sym, m);
         saveStratStats(sym, statsFromLog(m));
@@ -1794,6 +1930,8 @@ async function syncCloud(){
 const FEE_MAKER = 0.0002;
 const FEE_TAKER = 0.0005;
 const ACCOUNT_INITIAL = 100;
+// Minimum sit-out after any close before a new suggestion may be issued.
+const COOLDOWN_MS = 10 * 60 * 1000;
 
 function loadAccountCfg(){
   try{
