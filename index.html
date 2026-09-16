@@ -949,7 +949,7 @@ async function loadData(){
         saveStratStats(name, stratStats);
         tradeLog = [...tradeLog, { result: outcome, reason, closedAt: Date.now() }].slice(-500);
         saveTradeLog(name, tradeLog);
-        syncWithGitHub();
+        syncCloud();
         // Don't redeploy immediately — sit out until sentiment/technicals
         // stabilize, rather than chasing straight back in after a stop-out.
         stratState = { status: 'cooldown', lastOutcome: outcome, lastReason: reason, closedAt: Date.now() };
@@ -1636,20 +1636,14 @@ async function loadWhales(){
   }
 }
 
-// ---- GitHub cross-device sync ----
-// Trade log lives in one JSON file in the repo so phone / iPad / desktop all
-// converge on the same history. The log is the source of truth; win/loss
-// counts are always derived from it, so merging is just a union by timestamp.
-const GH_OWNER = 'melonduck726';
-const GH_REPO  = 'quant-monitor';
-const GH_PATH  = 'stats.json';
-const GH_TOKEN = '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';
-const GH_API = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_PATH}`;
-let ghSha = null;
-let ghSyncing = false;
-
-const b64encode = (s) => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
-const b64decode = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g,'')), c => c.charCodeAt(0)));
+// ---- JSONBin cross-device sync ----
+// Trade log lives in one hosted JSON bin so phone / iPad / desktop converge on
+// the same history. The log is the source of truth; win/loss counts are always
+// derived from it, so merging is just a union by close timestamp.
+const JB_BIN_ID = '6aaa8cefffd5d160530e0a05';
+const JB_KEY    = '$2a$10$iQeqaUgEiz6wt1XUAq5AqO/ea8olRXb88elbhkCeI2QC2Quu0ddBq';
+const JB_API    = `https://api.jsonbin.io/v3/b/${JB_BIN_ID}`;
+let jbSyncing = false;
 
 function statsFromLog(log){
   return {
@@ -1665,34 +1659,22 @@ function mergeLogs(a, b){
   return [...seen.values()].sort((x,y) => x.closedAt - y.closedAt).slice(-500);
 }
 
-async function ghRead(){
-  const res = await fetch(`${GH_API}?ref=main&t=${Date.now()}`, {
-    headers: { Authorization: `Bearer ${GH_TOKEN}`, Accept: 'application/vnd.github+json' }
+async function jbRead(){
+  const res = await fetch(`${JB_API}/latest?meta=false&t=${Date.now()}`, {
+    headers: { 'X-Master-Key': JB_KEY }
   });
-  if(res.status === 404) return { data: {}, sha: null };
   if(!res.ok) throw new Error(`read ${res.status}`);
-  const j = await res.json();
-  ghSha = j.sha;
-  try{ return { data: JSON.parse(b64decode(j.content)), sha: j.sha }; }
-  catch(e){ return { data: {}, sha: j.sha }; }
+  return res.json();
 }
 
-async function ghWrite(payload){
-  const body = {
-    message: `sync stats ${new Date().toISOString()}`,
-    content: b64encode(JSON.stringify(payload, null, 2)),
-    branch: 'main',
-  };
-  if(ghSha) body.sha = ghSha;
-  const res = await fetch(GH_API, {
+async function jbWrite(payload){
+  const res = await fetch(JB_API, {
     method: 'PUT',
-    headers: { Authorization: `Bearer ${GH_TOKEN}`, Accept: 'application/vnd.github+json' },
-    body: JSON.stringify(body)
+    headers: { 'Content-Type': 'application/json', 'X-Master-Key': JB_KEY },
+    body: JSON.stringify(payload)
   });
   if(!res.ok) throw new Error(`write ${res.status}`);
-  const j = await res.json();
-  ghSha = j.content && j.content.sha;
-  return j;
+  return res.json();
 }
 
 function setSyncStatus(cls, text){
@@ -1702,34 +1684,34 @@ function setSyncStatus(cls, text){
 
 // Pull remote, union with whatever this device has, write the merged result
 // back, and leave every device holding the same log.
-async function syncWithGitHub(){
-  if(ghSyncing) return;
-  ghSyncing = true;
+async function syncCloud(){
+  if(jbSyncing) return;
+  jbSyncing = true;
   try{
     setSyncStatus('sync-busy', '同步中…');
-    const { data: remote } = await ghRead();
+    const remote = await jbRead();
     const merged = {};
-    let changed = false;
+    let localChanged = false, remoteStale = false;
     ['BTC','ETH','ZEC'].forEach(sym => {
       const localLog  = loadTradeLog(sym);
-      const remoteLog = (remote[sym] && remote[sym].log) || [];
+      const remoteLog = (remote && remote[sym] && remote[sym].log) || [];
       const m = mergeLogs(localLog, remoteLog);
       merged[sym] = { log: m, stats: statsFromLog(m) };
       if(m.length !== localLog.length){
         saveTradeLog(sym, m);
         saveStratStats(sym, statsFromLog(m));
-        changed = true;
+        localChanged = true;
       }
-      if(m.length !== remoteLog.length) changed = true;
+      if(m.length !== remoteLog.length) remoteStale = true;
     });
     merged.updatedAt = new Date().toISOString();
-    await ghWrite(merged);
+    if(remoteStale) await jbWrite(merged);
     setSyncStatus('sync-ok', `已同步 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`);
-    if(changed) loadData();
+    if(localChanged) loadData();
   } catch(err){
     setSyncStatus('sync-err', `同步失败（${err.message}）`);
   } finally {
-    ghSyncing = false;
+    jbSyncing = false;
   }
 }
 
@@ -1785,9 +1767,9 @@ loadOrderBook();
 loadSentiment();
 loadOverview();
 loadWhales();
-syncWithGitHub();
+syncCloud();
 startTimer();
-setInterval(syncWithGitHub, 60 * 1000);
+setInterval(syncCloud, 60 * 1000);
 setInterval(loadOverview, 2 * 1000);
 setInterval(loadWhales, 2 * 60 * 1000);
 setInterval(loadNews, 10 * 1000);
