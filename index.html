@@ -133,6 +133,19 @@
   .vp-line.neu{ border-left-color: var(--neutral); }
 
   .strategy-note{ color: var(--text-dim); font-size:12px; line-height:1.7; }
+  .status-badge{
+    display:flex; align-items:center; gap:8px; font-family:'IBM Plex Mono', monospace;
+    font-size:12px; padding:7px 10px; border-radius:7px; margin-bottom:12px;
+    background: var(--surface-2); border:1px solid var(--border); color: var(--text-dim);
+  }
+  .status-badge.active{ color: var(--pos); border-color: rgba(52,211,153,0.35); }
+  .status-badge.pending{ color: var(--neutral); border-color: rgba(201,168,76,0.3); }
+  .status-badge span{ color: var(--text-dim); font-family:'Inter',sans-serif; font-size:11.5px; }
+  .reset-stats-btn{
+    font-family:'Inter',sans-serif; font-size:11.5px; color: var(--text-dim);
+    background: none; border:1px solid var(--border); border-radius:7px;
+    padding:6px 10px; margin-bottom:10px; cursor:pointer;
+  }
 
   .liq-card{
     background: var(--surface); border:1px solid var(--border); border-radius: 14px;
@@ -397,11 +410,56 @@ function volumePriceVerdict(candles){
 }
 
 function decimals(name){ return name==='BTC' ? 1 : name==='ETH' ? 2 : 3; }
+
+// Locked-trade tracker: once a strategy suggestion is issued it's persisted
+// (per symbol, in localStorage) and held fixed through "pending" (waiting for
+// price to reach the limit entry) and "active" (waiting for stop/target) until
+// it resolves — only then does a new suggestion get generated. This is what
+// keeps the card from re-computing a fresh entry/stop/target on every refresh.
+function loadStratState(symbol){
+  try{
+    const raw = localStorage.getItem(`qm_stratState_${symbol}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch(e){ return null; }
+}
+function saveStratState(symbol, state){
+  try{
+    if(state === null) localStorage.removeItem(`qm_stratState_${symbol}`);
+    else localStorage.setItem(`qm_stratState_${symbol}`, JSON.stringify(state));
+  } catch(e){ /* storage unavailable, tracking just won't persist */ }
+}
+function loadStratStats(symbol){
+  try{
+    const raw = localStorage.getItem(`qm_stratStats_${symbol}`);
+    return raw ? JSON.parse(raw) : { wins: 0, losses: 0 };
+  } catch(e){ return { wins: 0, losses: 0 }; }
+}
+function saveStratStats(symbol, stats){
+  try{ localStorage.setItem(`qm_stratStats_${symbol}`, JSON.stringify(stats)); } catch(e){ /* ignore */ }
+}
+function resetStratStats(symbol){
+  saveStratStats(symbol, { wins: 0, losses: 0 });
+  saveStratState(symbol, null);
+  saveTradeLog(symbol, []);
+}
+function loadTradeLog(symbol){
+  try{
+    const raw = localStorage.getItem(`qm_tradeLog_${symbol}`);
+    return raw ? JSON.parse(raw) : [];
+  } catch(e){ return []; }
+}
+function saveTradeLog(symbol, log){
+  try{ localStorage.setItem(`qm_tradeLog_${symbol}`, JSON.stringify(log.slice(-500))); } catch(e){ /* ignore */ }
+}
+
 function fmt(n, d){ return Number(n).toLocaleString('en-US', {minimumFractionDigits:d, maximumFractionDigits:d}); }
 
 // Backtest: replay the same EMA20/EMA60/RSI14/MACD-hist rule bar-by-bar on
 // recent history and check whether the next bar actually moved the predicted way.
-function backtestWinRate(candles, lookback=100){
+// Returns a 95% binomial confidence interval alongside the point estimate —
+// with a sample in the low hundreds, the raw percentage alone is noisy enough
+// to be misleading on its own.
+function backtestWinRate(candles, lookback=180){
   const closes = candles.map(c=>c.close);
   if(closes.length < 70) return null;
   const e20 = emaSeries(closes,20);
@@ -421,7 +479,11 @@ function backtestWinRate(candles, lookback=100){
     if((d==='long' && moveUp) || (d==='short' && !moveUp)) wins++;
   }
   if(total === 0) return null;
-  return { rate: wins/total*100, sample: total };
+  const p = wins/total;
+  const se = Math.sqrt(p*(1-p)/total);
+  const ciLow = Math.max(0, (p - 1.96*se) * 100);
+  const ciHigh = Math.min(100, (p + 1.96*se) * 100);
+  return { rate: p*100, sample: total, ciLow, ciHigh };
 }
 
 function findSwingLevels(candles, pivotSpan=2){
@@ -462,9 +524,25 @@ function strategyDirection(score, rsi5){
 // Entry = nearby minor pullback level (tight pivot), stop = further major level (wide pivot).
 // Always returns a suggestion (even when multi-period signal is weak/flat) — in
 // that case confidence is marked '弱' and the note says so, rather than hiding.
-function buildStrategy(score, periodCount, price, k5m, k15, name, rsi5, atr15m){
+function adjustConfidenceForVolume(base, dir, vp15, vp1h){
+  const order = ['弱','中','强'];
+  let idx = order.indexOf(base);
+  const supportive = (vp) => vp && ((dir==='long' && vp.cls==='pos') || (dir==='short' && vp.cls==='neg'));
+  const contradicting = (vp) => vp && ((dir==='long' && vp.cls==='neg') || (dir==='short' && vp.cls==='pos'));
+  let net = 0;
+  [vp15, vp1h].forEach(vp => { if(supportive(vp)) net++; else if(contradicting(vp)) net--; });
+  if(net > 0) idx = Math.min(2, idx+1);
+  else if(net < 0) idx = Math.max(0, idx-1);
+  return { level: order[idx], net };
+}
+
+function buildStrategy(score, periodCount, price, k5m, k15, name, rsi5, atr15m, vp15, vp1h){
   const dir = strategyDirection(score, rsi5);
-  const confidence = strategyConfidence(score, periodCount);
+  const baseConfidence = strategyConfidence(score, periodCount);
+  const { level: confidence, net: volNet } = adjustConfidenceForVolume(baseConfidence, dir, vp15, vp1h);
+  const volNote = volNet > 0 ? '量价关系支持该方向，信号强度已上调。'
+    : volNet < 0 ? '量价关系与该方向相悖（价量背离或反向放量），信号强度已下调，建议更谨慎。'
+    : '';
   const d = decimals(name);
   const recent40 = k5m.slice(-40);
   const recent80 = k5m.slice(-80);
@@ -524,8 +602,9 @@ function buildStrategy(score, periodCount, price, k5m, k15, name, rsi5, atr15m){
     return {
       dir: 'long', dirLabel: '日内做多参考',
       confidence, rr: rr.toFixed(1),
+      rawEntry: entry, rawStop: stop, rawTarget: target,
       entry: fmt(entry,d), stop: fmt(stop,d), target: fmt(target,d),
-      note: `建议挂限价单在 ${fmt(entry,d)} 附近的回踩支撑位，等回踩确认再进场。止损参考更下方的结构性支撑${widened ? '（附近结构位太近，已按15m ATR放宽到最小有效距离）' : ''}。止盈参考 ${fmt(target,d)}（${source}），对应盈亏比约 1:${rr.toFixed(1)}。${styleCompareNote(distancePct)} ${weakNote}`
+      note: `建议挂限价单在 ${fmt(entry,d)} 附近的回踩支撑位，等回踩确认再进场。止损参考更下方的结构性支撑${widened ? '（附近结构位太近，已按15m ATR放宽到最小有效距离）' : ''}。止盈参考 ${fmt(target,d)}（${source}），对应盈亏比约 1:${rr.toFixed(1)}。${styleCompareNote(distancePct)} ${volNote} ${weakNote}`
     };
   }
 
@@ -542,8 +621,9 @@ function buildStrategy(score, periodCount, price, k5m, k15, name, rsi5, atr15m){
   return {
     dir: 'short', dirLabel: '日内做空参考',
     confidence, rr: rr.toFixed(1),
+    rawEntry: entry, rawStop: stop, rawTarget: target,
     entry: fmt(entry,d), stop: fmt(stop,d), target: fmt(target,d),
-    note: `建议挂限价单在 ${fmt(entry,d)} 附近的反抽压力位，等反抽确认再进场。止损参考更上方的结构性压力${widened ? '（附近结构位太近，已按15m ATR放宽到最小有效距离）' : ''}。止盈参考 ${fmt(target,d)}（${source}），对应盈亏比约 1:${rr.toFixed(1)}。${styleCompareNote(distancePct)} ${weakNote}`
+    note: `建议挂限价单在 ${fmt(entry,d)} 附近的反抽压力位，等反抽确认再进场。止损参考更上方的结构性压力${widened ? '（附近结构位太近，已按15m ATR放宽到最小有效距离）' : ''}。止盈参考 ${fmt(target,d)}（${source}），对应盈亏比约 1:${rr.toFixed(1)}。${styleCompareNote(distancePct)} ${volNote} ${weakNote}`
   };
 }
 
@@ -557,7 +637,7 @@ async function loadData(){
       fetchCandles(state.inst, '5m', 300),
       fetchCandles(state.inst, '15m', 260),
       fetchCandles(state.inst, '30m', 200),
-      fetchCandles(state.inst, '1H', 100),
+      fetchCandles(state.inst, '1H', 300),
       fetchCandles(state.inst, '4H', 100),
     ]);
 
@@ -598,13 +678,16 @@ async function loadData(){
     const changeSign = change >= 0 ? '+' : '';
     const d = decimals(name);
 
-    // Win-rate: backtest the same rule on 5m bars (matches short-term trading horizon)
-    const backtest = backtestWinRate(periods[2].candles, 100);
+    // Win-rate: backtest the same rule on 15m and 1H bars.
+    const backtest = backtestWinRate(periods[2].candles, 180);
     const winRate = backtest ? backtest.rate : null;
     const winRateCls = winRate === null ? 'mid' : winRate >= 55 ? 'high' : winRate >= 45 ? 'mid' : 'low';
+    const backtest1h = backtestWinRate(periods[4].candles, 200);
+    const winRate1h = backtest1h ? backtest1h.rate : null;
+    const winRate1hCls = winRate1h === null ? 'mid' : winRate1h >= 55 ? 'high' : winRate1h >= 45 ? 'mid' : 'low';
 
-    const strategy = buildStrategy(score, periodCount, last, k5m, k15, name, periods[1].m.rsi, periods[2].m.atr);
-
+    // Volume-price read, computed up front so the strategy card can factor it
+    // into confidence (not just display it separately below).
     const vwap = computeVWAP(periods[2].candles.slice(-96));
     const obvArr15 = computeOBV(periods[2].candles);
     const obvTrend15 = obvArr15[obvArr15.length-1] - obvArr15[Math.max(0, obvArr15.length-21)];
@@ -612,6 +695,69 @@ async function loadData(){
     const obvTrend1h = obvArr1h[obvArr1h.length-1] - obvArr1h[Math.max(0, obvArr1h.length-21)];
     const vp15 = volumePriceVerdict(periods[2].candles);
     const vp1h = volumePriceVerdict(periods[4].candles);
+
+    // Locked-trade state machine: don't recompute entry/stop/target every
+    // cycle — hold the last suggestion until price actually resolves it
+    // (hits stop or target), tracking cumulative win/loss per symbol.
+    let stratState = loadStratState(name);
+    let stratStats = loadStratStats(name);
+    let tradeLog = loadTradeLog(name);
+
+    function freshSuggestion(){
+      const built = buildStrategy(score, periodCount, last, k5m, k15, name, periods[1].m.rsi, periods[2].m.atr, vp15, vp1h);
+      const next = { ...built, status: 'pending', createdAt: Date.now() };
+      saveStratState(name, next);
+      return next;
+    }
+
+    if(!stratState){
+      stratState = freshSuggestion();
+    } else if(stratState.status === 'pending'){
+      const liveDir = strategyDirection(score, periods[1].m.rsi);
+      if(liveDir !== stratState.dir){
+        // underlying thesis flipped before entry was ever hit — cancel and reissue
+        stratState = freshSuggestion();
+      } else {
+        const triggered = stratState.dir === 'long' ? last <= stratState.rawEntry : last >= stratState.rawEntry;
+        if(triggered){
+          stratState = { ...stratState, status: 'active', activatedAt: Date.now() };
+          saveStratState(name, stratState);
+        }
+      }
+    } else if(stratState.status === 'active'){
+      let outcome = null;
+      if(stratState.dir === 'long'){
+        if(last >= stratState.rawTarget) outcome = 'win';
+        else if(last <= stratState.rawStop) outcome = 'loss';
+      } else {
+        if(last <= stratState.rawTarget) outcome = 'win';
+        else if(last >= stratState.rawStop) outcome = 'loss';
+      }
+      if(outcome){
+        stratStats = { ...stratStats, [outcome === 'win' ? 'wins' : 'losses']: stratStats[outcome === 'win' ? 'wins' : 'losses'] + 1 };
+        saveStratStats(name, stratStats);
+        tradeLog = [...tradeLog, { result: outcome, closedAt: Date.now() }].slice(-500);
+        saveTradeLog(name, tradeLog);
+        stratState = freshSuggestion();
+      }
+    }
+    const strategy = stratState;
+    const stratTotal = stratStats.wins + stratStats.losses;
+    const stratWinRate = stratTotal > 0 ? (stratStats.wins / stratTotal * 100) : null;
+    const statusLabel = strategy.status === 'active' ? '持仓中，等待触及止损/止盈' : '待入场，等待价格触达限价位';
+
+    // Day / week / month breakdown from the trade log (rolling windows, not
+    // calendar-aligned — avoids timezone edge cases at day/week boundaries).
+    function windowStats(log, ms){
+      const cutoff = Date.now() - ms;
+      const recent = log.filter(t => t.closedAt >= cutoff);
+      const wins = recent.filter(t => t.result === 'win').length;
+      const total = recent.length;
+      return { wins, total, rate: total > 0 ? (wins/total*100) : null };
+    }
+    const statsDay = windowStats(tradeLog, 24*60*60*1000);
+    const statsWeek = windowStats(tradeLog, 7*24*60*60*1000);
+    const statsMonth = windowStats(tradeLog, 30*24*60*60*1000);
 
     // Caution band: how far price has stretched from VWAP, sized off 15m ATR.
     const atr15 = periods[2].m.atr;
@@ -699,16 +845,36 @@ async function loadData(){
           <div class="strategy-dir ${strategy.dir}">${strategy.dirLabel}</div>
           <div class="confidence">信号强度 · ${strategy.confidence}</div>
         </div>
+        <div class="status-badge ${strategy.status}">${strategy.status === 'active' ? '● 持仓中' : '○ 待触发'}<span>${statusLabel}</span></div>
         <div class="strategy-grid">
           <div class="strategy-cell"><div class="k">限价入场</div><div class="v entry">${strategy.entry}</div></div>
           <div class="strategy-cell"><div class="k">止损参考</div><div class="v stop">${strategy.stop}</div></div>
           <div class="strategy-cell"><div class="k">止盈参考（1:${strategy.rr}）</div><div class="v target">${strategy.target}</div></div>
         </div>
         <div class="winrate-row">
-          <div class="k">预测胜率（15m 规则回测）<span class="sample">${backtest ? `近 ${backtest.sample} 次同类信号` : '样本不足'}</span></div>
+          <div class="k">预测胜率（15m 规则回测）<span class="sample">${backtest ? `近 ${backtest.sample} 次同类信号，95%置信区间 ${backtest.ciLow.toFixed(0)}–${backtest.ciHigh.toFixed(0)}%` : '样本不足'}</span></div>
           <div class="v ${winRateCls}">${winRate === null ? '—' : winRate.toFixed(0)+'%'}</div>
         </div>
+        <div class="winrate-row">
+          <div class="k">预测胜率（1H 规则回测）<span class="sample">${backtest1h ? `近 ${backtest1h.sample} 次同类信号，95%置信区间 ${backtest1h.ciLow.toFixed(0)}–${backtest1h.ciHigh.toFixed(0)}%` : '样本不足'}</span></div>
+          <div class="v ${winRate1hCls}">${winRate1h === null ? '—' : winRate1h.toFixed(0)+'%'}</div>
+        </div>
+        <div class="winrate-row">
+          <div class="k">累计实盘统计（本机记录，${name}）<span class="sample">${stratTotal} 单：${stratStats.wins} 胜 ${stratStats.losses} 负</span></div>
+          <div class="v ${stratWinRate===null?'mid':stratWinRate>=55?'high':stratWinRate>=45?'mid':'low'}">${stratWinRate===null?'—':stratWinRate.toFixed(0)+'%'}</div>
+        </div>
+        <button class="reset-stats-btn" onclick="resetStratStats('${name}'); loadData();">重置${name}统计</button>
         <div class="strategy-note">${strategy.note}</div>
+      </div>
+
+      <div class="table-card">
+        <div class="label">分时段胜率 · ${name}（本机记录，锁单机制实际成交）</div>
+        <div class="liq-summary" style="padding:0 6px;">
+          <div class="liq-stat"><div class="k">近24小时</div><div class="v ${statsDay.rate===null?'mid':statsDay.rate>=55?'high':statsDay.rate>=45?'mid':'low'}">${statsDay.rate===null?'—':statsDay.rate.toFixed(0)+'%'}</div></div>
+          <div class="liq-stat"><div class="k">近7天</div><div class="v ${statsWeek.rate===null?'mid':statsWeek.rate>=55?'high':statsWeek.rate>=45?'mid':'low'}">${statsWeek.rate===null?'—':statsWeek.rate.toFixed(0)+'%'}</div></div>
+          <div class="liq-stat"><div class="k">近30天</div><div class="v ${statsMonth.rate===null?'mid':statsMonth.rate>=55?'high':statsMonth.rate>=45?'mid':'low'}">${statsMonth.rate===null?'—':statsMonth.rate.toFixed(0)+'%'}</div></div>
+        </div>
+        <div class="strategy-note" style="padding:0 6px;">近24小时 ${statsDay.wins}胜${statsDay.total-statsDay.wins}负，近7天 ${statsWeek.wins}胜${statsWeek.total-statsWeek.wins}负，近30天 ${statsMonth.wins}胜${statsMonth.total-statsMonth.wins}负。样本积累需要时间，刚开始用的时候几个窗口都可能是"—"，正常。</div>
       </div>
 
       <div class="table-card">
