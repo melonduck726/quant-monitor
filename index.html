@@ -6,7 +6,6 @@
 <title>BTC / ETH / ZEC 多周期实时监测</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root{
     --bg: #0a0e1a;
@@ -125,21 +124,6 @@
   .winrate-row .v.low{ color: var(--neg); }
   .strategy-note{ color: var(--text-dim); font-size:12px; line-height:1.7; }
 
-  .chart-card{
-    background: var(--surface); border:1px solid var(--border); border-radius: 14px;
-    padding: 16px 16px 8px; margin-bottom: 14px;
-  }
-  .chart-head{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
-  .chart-head .label{ color: var(--text-dim); font-size:12.5px; }
-  .chart-tfs{ display:flex; gap:4px; }
-  .chart-tf{
-    font-family:'IBM Plex Mono', monospace; font-size:11px; color: var(--text-dim);
-    background: var(--surface-2); border:1px solid var(--border); border-radius:6px;
-    padding: 4px 8px; cursor:pointer;
-  }
-  .chart-tf.active{ color: var(--eth); border-color: var(--eth); background: rgba(139,155,255,0.12); }
-  #chartContainer{ width:100%; height:240px; }
-
   .liq-card{
     background: var(--surface); border:1px solid var(--border); border-radius: 14px;
     padding: 18px 20px; margin-bottom: 14px;
@@ -216,21 +200,6 @@
     <div class="countdown" id="countdown">下次刷新 2s</div>
   </div>
 
-  <div class="chart-card">
-    <div class="chart-head">
-      <div class="label">K线图 · EMA20 / EMA60 / 成交量 随分析同步</div>
-      <div class="chart-tfs" id="chartTfs">
-        <button class="chart-tf" data-tf="1m">1m</button>
-        <button class="chart-tf" data-tf="5m">5m</button>
-        <button class="chart-tf active" data-tf="15m">15m</button>
-        <button class="chart-tf" data-tf="45m">45m</button>
-        <button class="chart-tf" data-tf="1H">1H</button>
-        <button class="chart-tf" data-tf="4H">4H</button>
-      </div>
-    </div>
-    <div id="chartContainer"></div>
-  </div>
-
   <div id="content">
     <div class="loading">正在加载行情数据…</div>
   </div>
@@ -259,69 +228,13 @@
   </div>
 
   <div class="footnote">
-    指标覆盖 1m / 5m / 15m / 45m / 1H / 4H 六个周期实时计算（45m 由 15m 聚合得出），EMA20/EMA60/RSI14/MACD柱/ATR14。策略参考价基于 ATR 波动率测算，胜率为近期历史信号回测统计，非未来保证。均为技术指标概率倾向，不构成投资建议，请自行控制仓位与风险。消息面标签为关键词粗略情绪判断，非专业情绪分析。
+    指标覆盖 1m / 5m / 15m / 30m / 1H / 4H 六个周期，均为OKX原生K线周期实时计算，EMA20/EMA60/RSI14/MACD柱/ATR14。策略参考价基于 ATR 波动率测算，胜率为近期历史信号回测统计，非未来保证。均为技术指标概率倾向，不构成投资建议，请自行控制仓位与风险。消息面标签为关键词粗略情绪判断，非专业情绪分析。
   </div>
 </div>
 
 <script>
-const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 2, chartTf: '15m', periodsByLabel: {} };
+const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 2 };
 const OKX_BASE = 'https://www.okx.com';
-
-let chart = null, candleSeries = null, emaFastSeries = null, emaSlowSeries = null, volumeSeries = null;
-
-function ensureChart(){
-  if(chart) return;
-  const container = document.getElementById('chartContainer');
-  chart = LightweightCharts.createChart(container, {
-    width: container.clientWidth,
-    height: 240,
-    layout: { background: { color: 'transparent' }, textColor: '#8993ac', fontFamily: "'IBM Plex Mono', monospace" },
-    grid: { vertLines: { color: '#1a2138' }, horzLines: { color: '#1a2138' } },
-    rightPriceScale: { borderColor: '#232c47' },
-    timeScale: { borderColor: '#232c47', timeVisible: true, secondsVisible: false },
-    crosshair: { mode: 1 },
-  });
-  candleSeries = chart.addCandlestickSeries({
-    upColor: '#34d399', downColor: '#fb7185', borderVisible: false,
-    wickUpColor: '#34d399', wickDownColor: '#fb7185'
-  });
-  emaFastSeries = chart.addLineSeries({ color: '#8b9bff', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-  emaSlowSeries = chart.addLineSeries({ color: '#f2a93b', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-  volumeSeries = chart.addHistogramSeries({
-    priceFormat: { type: 'volume' }, priceScaleId: '',
-    scaleMargins: { top: 0.82, bottom: 0 }
-  });
-  window.addEventListener('resize', () => {
-    if(chart) chart.applyOptions({ width: container.clientWidth });
-  });
-}
-
-function renderChart(candles){
-  if(!candles || candles.length < 5) return;
-  ensureChart();
-  const times = candles.map(c => Math.floor(c.time/1000));
-  candleSeries.setData(candles.map((c,i) => ({ time: times[i], open:c.open, high:c.high, low:c.low, close:c.close })));
-  const closes = candles.map(c => c.close);
-  const e20 = emaSeries(closes, 20);
-  const e60 = emaSeries(closes, 60);
-  emaFastSeries.setData(times.map((t,i) => ({ time: t, value: e20[i] })));
-  emaSlowSeries.setData(times.map((t,i) => ({ time: t, value: e60[i] })));
-  volumeSeries.setData(candles.map((c,i) => ({
-    time: times[i], value: c.volume || 0,
-    color: c.close >= c.open ? 'rgba(52,211,153,0.5)' : 'rgba(251,113,133,0.5)'
-  })));
-  chart.timeScale().fitContent();
-}
-
-function setChartTf(tf){
-  state.chartTf = tf;
-  document.querySelectorAll('.chart-tf').forEach(btn => btn.classList.toggle('active', btn.dataset.tf === tf));
-  if(state.periodsByLabel[tf]) renderChart(state.periodsByLabel[tf].candles);
-}
-document.getElementById('chartTfs').addEventListener('click', (e) => {
-  const btn = e.target.closest('.chart-tf');
-  if(btn) setChartTf(btn.dataset.tf);
-});
 
 function emaSeries(values, period){
   const k = 2/(period+1);
@@ -421,20 +334,42 @@ async function fetchTicker(instId){
   return json.data[0];
 }
 
-function aggregate(candles, groupSize){
-  const out = [];
-  for(let i=0;i+groupSize<=candles.length;i+=groupSize){
-    const group = candles.slice(i, i+groupSize);
-    out.push({
-      time: group[0].time,
-      open: group[0].open,
-      close: group[group.length-1].close,
-      high: Math.max(...group.map(c=>c.high)),
-      low: Math.min(...group.map(c=>c.low)),
-      volume: group.reduce((s,c)=>s+(c.volume||0),0),
-    });
+function computeVWAP(candles){
+  let pv = 0, vv = 0;
+  candles.forEach(c => {
+    const typical = (c.high + c.low + c.close) / 3;
+    pv += typical * (c.volume || 0);
+    vv += (c.volume || 0);
+  });
+  return vv > 0 ? pv / vv : null;
+}
+
+function computeOBV(candles){
+  let obv = 0;
+  const arr = [0];
+  for(let i=1;i<candles.length;i++){
+    if(candles[i].close > candles[i-1].close) obv += candles[i].volume || 0;
+    else if(candles[i].close < candles[i-1].close) obv -= candles[i].volume || 0;
+    arr.push(obv);
   }
-  return out;
+  return arr;
+}
+
+// Classic 量价关系 read: compare recent price change vs recent volume change.
+function volumePriceVerdict(candles){
+  if(candles.length < 21) return null;
+  const recent = candles.slice(-10);
+  const prior = candles.slice(-20,-10);
+  const priceChangePct = (recent[recent.length-1].close - recent[0].open) / recent[0].open * 100;
+  const volRecentAvg = recent.reduce((s,c)=>s+(c.volume||0),0) / recent.length;
+  const volPriorAvg = prior.reduce((s,c)=>s+(c.volume||0),0) / prior.length;
+  const volChangePct = volPriorAvg > 0 ? (volRecentAvg-volPriorAvg)/volPriorAvg*100 : 0;
+  let label, cls;
+  if(priceChangePct > 0 && volChangePct > 0){ label = '价涨量增（趋势健康）'; cls = 'pos'; }
+  else if(priceChangePct > 0 && volChangePct <= 0){ label = '价涨量缩（上涨乏力，警惕背离）'; cls = 'neu'; }
+  else if(priceChangePct <= 0 && volChangePct > 0){ label = '价跌量增（抛压增强）'; cls = 'neg'; }
+  else { label = '价跌量缩（下跌动能减弱）'; cls = 'neu'; }
+  return { label, cls, priceChangePct, volChangePct };
 }
 
 function decimals(name){ return name==='BTC' ? 1 : name==='ETH' ? 2 : 3; }
@@ -558,21 +493,21 @@ async function loadData(){
   const content = document.getElementById('content');
   const name = state.name;
   try{
-    const [ticker, k1m, k5m, k15, k1h, k4h] = await Promise.all([
+    const [ticker, k1m, k5m, k15, k30, k1h, k4h] = await Promise.all([
       fetchTicker(state.inst),
       fetchCandles(state.inst, '1m', 200),
       fetchCandles(state.inst, '5m', 300),
       fetchCandles(state.inst, '15m', 260),
+      fetchCandles(state.inst, '30m', 200),
       fetchCandles(state.inst, '1H', 100),
       fetchCandles(state.inst, '4H', 100),
     ]);
-    const k45 = aggregate(k15, 3);
 
     const periods = [
       { label: '1m',  candles: k1m },
       { label: '5m',  candles: k5m },
       { label: '15m', candles: k15 },
-      { label: '45m', candles: k45 },
+      { label: '30m', candles: k30 },
       { label: '1H',  candles: k1h },
       { label: '4H',  candles: k4h },
     ].map(p => {
@@ -581,8 +516,6 @@ async function loadData(){
       return { ...p, m, d };
     });
     const periodCount = periods.length;
-    state.periodsByLabel = Object.fromEntries(periods.map(p => [p.label, p]));
-    renderChart(state.periodsByLabel[state.chartTf]?.candles);
 
     const score = periods.reduce((s,p)=> s + (p.d==='long'?1:p.d==='short'?-1:0), 0);
     const threshold = Math.ceil(periodCount/2);
@@ -608,11 +541,32 @@ async function loadData(){
     const d = decimals(name);
 
     // Win-rate: backtest the same rule on 5m bars (matches short-term trading horizon)
-    const backtest = backtestWinRate(k5m, 100);
+    const backtest = backtestWinRate(periods[2].candles, 100);
     const winRate = backtest ? backtest.rate : null;
     const winRateCls = winRate === null ? 'mid' : winRate >= 55 ? 'high' : winRate >= 45 ? 'mid' : 'low';
 
     const strategy = buildStrategy(score, periodCount, last, k5m, name, periods[1].m.rsi);
+
+    const vwap = computeVWAP(periods[2].candles.slice(-96));
+    const obvArr15 = computeOBV(periods[2].candles);
+    const obvTrend15 = obvArr15[obvArr15.length-1] - obvArr15[Math.max(0, obvArr15.length-21)];
+    const obvArr1h = computeOBV(periods[4].candles);
+    const obvTrend1h = obvArr1h[obvArr1h.length-1] - obvArr1h[Math.max(0, obvArr1h.length-21)];
+    const vp15 = volumePriceVerdict(periods[2].candles);
+    const vp1h = volumePriceVerdict(periods[4].candles);
+
+    // Caution band: how far price has stretched from VWAP, sized off 15m ATR.
+    const atr15 = periods[2].m.atr;
+    const cautionUpper = vwap ? vwap + atr15*2 : null;
+    const cautionLower = vwap ? vwap - atr15*2 : null;
+    let cautionNote = '';
+    if(cautionUpper && cautionLower){
+      if(last >= cautionUpper) cautionNote = `现价已突破警惕上沿 ${fmt(cautionUpper,d)}，明显偏离VWAP，注意冲高回落风险。`;
+      else if(last <= cautionLower) cautionNote = `现价已跌破警惕下沿 ${fmt(cautionLower,d)}，明显偏离VWAP，注意破位加速下跌风险。`;
+      else cautionNote = `警惕位：突破 ${fmt(cautionUpper,d)} 需留意冲高回落，跌破 ${fmt(cautionLower,d)} 需留意破位下探。`;
+    }
+    const divergence = (vp15 && vp15.cls==='neu') || (vp1h && vp1h.cls==='neu');
+    if(divergence) cautionNote += ' 当前已有量价背离迹象（涨/跌但量没跟上），信号可信度打折。';
 
     const now = new Date();
     const timeStr = now.toLocaleTimeString('zh-CN', {hour12:false});
@@ -668,14 +622,31 @@ async function loadData(){
           <div class="strategy-cell"><div class="k">止盈参考（1:3）</div><div class="v target">${strategy.target}</div></div>
         </div>
         <div class="winrate-row">
-          <div class="k">预测胜率（5m 规则回测）<span class="sample">${backtest ? `近 ${backtest.sample} 次同类信号` : '样本不足'}</span></div>
+          <div class="k">预测胜率（15m 规则回测）<span class="sample">${backtest ? `近 ${backtest.sample} 次同类信号` : '样本不足'}</span></div>
           <div class="v ${winRateCls}">${winRate === null ? '—' : winRate.toFixed(0)+'%'}</div>
         </div>
         <div class="strategy-note">${strategy.note}</div>
       </div>
 
       <div class="table-card">
-        <div class="label">多周期指标 · 45m 由 15m 聚合计算</div>
+        <div class="label">量价关系 · 15m / 1H 趋势，VWAP(15m·24h)，OBV</div>
+        <div class="liq-summary" style="padding:0 6px;">
+          <div class="liq-stat"><div class="k">VWAP(24h)</div><div class="v">${vwap ? fmt(vwap,d) : '—'}</div></div>
+          <div class="liq-stat"><div class="k">现价 vs VWAP</div><div class="v ${vwap && last>=vwap ? 'long':'short'}">${vwap ? (last>=vwap?'高于':'低于') : '—'}</div></div>
+        </div>
+        <div class="liq-summary" style="padding:0 6px;">
+          <div class="liq-stat"><div class="k">OBV趋势(15m)</div><div class="v ${obvTrend15>=0?'long':'short'}">${obvTrend15>=0?'走高':'走低'}</div></div>
+          <div class="liq-stat"><div class="k">OBV趋势(1H)</div><div class="v ${obvTrend1h>=0?'long':'short'}">${obvTrend1h>=0?'走高':'走低'}</div></div>
+        </div>
+        <div class="strategy-note" style="padding:0 6px;">
+          ${vp15 ? `15m量价：${vp15.label}（价格${vp15.priceChangePct>=0?'+':''}${vp15.priceChangePct.toFixed(2)}%，量${vp15.volChangePct>=0?'+':''}${vp15.volChangePct.toFixed(1)}%）` : '15m样本不足'}<br>
+          ${vp1h ? `1H量价：${vp1h.label}（价格${vp1h.priceChangePct>=0?'+':''}${vp1h.priceChangePct.toFixed(2)}%，量${vp1h.volChangePct>=0?'+':''}${vp1h.volChangePct.toFixed(1)}%）` : '1H样本不足'}<br>
+          ${cautionNote}
+        </div>
+      </div>
+
+      <div class="table-card">
+        <div class="label">多周期指标 · OKX 原生K线（1m/5m/15m/30m/1H/4H）</div>
         <table>
           <thead><tr>
             <th>周期</th><th>EMA20</th><th>EMA60</th><th>RSI14</th><th>MACD</th><th>ATR14</th><th>方向</th>
