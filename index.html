@@ -144,6 +144,15 @@
   .liq-stat .k{ color: var(--text-dim); font-size:11px; margin-bottom:4px; }
   .liq-stat .v{ font-family:'IBM Plex Mono', monospace; font-size:14px; font-weight:600; }
   .liq-stat .v.long{ color: var(--pos); } .liq-stat .v.short{ color: var(--neg); }
+  .liq-stat .v.risk-low{ color: var(--pos); }
+  .liq-stat .v.risk-mid{ color: var(--neutral); }
+  .liq-stat .v.risk-high{ color: var(--neg); }
+  .divergence-alert{
+    display:flex; align-items:flex-start; gap:8px; padding:10px 12px;
+    border-radius:8px; margin-bottom:12px; font-size:13px; line-height:1.5;
+  }
+  .divergence-alert.warn{ background: rgba(251,113,133,0.1); border:1px solid rgba(251,113,133,0.35); color: var(--neg); }
+  .divergence-alert.ok{ background: rgba(52,211,153,0.08); border:1px solid rgba(52,211,153,0.25); color: var(--pos); }
   .liq-row{ display:flex; align-items:center; gap:8px; margin-bottom: 5px; }
   .liq-price{ width: 78px; flex-shrink:0; font-family:'IBM Plex Mono', monospace; font-size:11px; color: var(--text-dim); text-align:right; }
   .liq-bar-track{ flex:1; height: 14px; background:#151d33; border-radius:3px; overflow:hidden; }
@@ -453,7 +462,7 @@ function strategyDirection(score, rsi5){
 // Entry = nearby minor pullback level (tight pivot), stop = further major level (wide pivot).
 // Always returns a suggestion (even when multi-period signal is weak/flat) — in
 // that case confidence is marked '弱' and the note says so, rather than hiding.
-function buildStrategy(score, periodCount, price, k5m, name, rsi5){
+function buildStrategy(score, periodCount, price, k5m, k15, name, rsi5, atr15m){
   const dir = strategyDirection(score, rsi5);
   const confidence = strategyConfidence(score, periodCount);
   const d = decimals(name);
@@ -461,6 +470,11 @@ function buildStrategy(score, periodCount, price, k5m, name, rsi5){
   const recent80 = k5m.slice(-80);
   const minor = findSwingLevels(recent40, 1);   // tighter pivots → near-term pullback zone (entry)
   const major = findSwingLevels(recent80, 3);   // wider pivots → structural level (stop)
+  // Floor so a too-tight swing pair (common in quiet consolidation) never produces
+  // a trade too small to matter — scaled to this asset's own 15m volatility, so
+  // BTC/ETH/ZEC each get a floor proportional to how much they actually move.
+  const minDistance = atr15m * 1.2;
+  const minRR = 1.5; // reject a candidate target closer than 1.5x the stop distance
 
   const weakNote = confidence === '弱'
     ? `当前 ${periodCount} 个周期还没有形成明确共振，方向仅按短周期动能给出参考，建议轻仓试探或观望为主。`
@@ -473,34 +487,63 @@ function buildStrategy(score, periodCount, price, k5m, name, rsi5){
     return `止损空间约 ${distancePct.toFixed(2)}%，比你历史平均约 ${HIST_AVG_STOP_PCT}% 更紧，容易被扫损。`;
   }
 
+  // Target = next real support/resistance level beyond entry, not a mechanical
+  // multiple of the stop distance. Tries 5m structure first, then 15m for a
+  // further-out level if nothing on 5m clears a sane minimum reward:risk; only
+  // falls back to a flat 1:3 multiple if no structural level qualifies at all.
+  function findTarget(entry, distance, side){
+    const qualify = (levels) => levels
+      .filter(lvl => side === 'long' ? lvl > entry : lvl < entry)
+      .filter(lvl => Math.abs(lvl - entry) >= distance * minRR)
+      .sort((a,b) => side === 'long' ? a-b : b-a);
+
+    let candidates = qualify(side === 'long' ? major.highs : major.lows);
+    if(candidates.length) return { target: candidates[0], source: '5m结构位' };
+
+    const swing15 = findSwingLevels(k15.slice(-60), 2);
+    candidates = qualify(side === 'long' ? swing15.highs : swing15.lows);
+    if(candidates.length) return { target: candidates[0], source: '15m结构位' };
+
+    return {
+      target: side === 'long' ? entry + distance*3 : entry - distance*3,
+      source: '附近无合适结构位，按1:3倍数'
+    };
+  }
+
   if(dir === 'long'){
     const minorLows = minor.lows.filter(l => l < price);
     const entry = minorLows.length ? Math.max(...minorLows) : price;
     const majorLows = major.lows.filter(l => l < entry);
-    const stop = majorLows.length ? Math.max(...majorLows) : Math.min(...recent80.map(c=>c.low));
-    const distance = entry - stop;
-    const target = entry + distance * 3;
+    let stop = majorLows.length ? Math.max(...majorLows) : Math.min(...recent80.map(c=>c.low));
+    let distance = entry - stop;
+    let widened = false;
+    if(distance < minDistance){ stop = entry - minDistance; distance = minDistance; widened = true; }
+    const { target, source } = findTarget(entry, distance, 'long');
+    const rr = (target - entry) / distance;
     const distancePct = (distance / entry) * 100;
     return {
       dir: 'long', dirLabel: '日内做多参考',
-      confidence,
+      confidence, rr: rr.toFixed(1),
       entry: fmt(entry,d), stop: fmt(stop,d), target: fmt(target,d),
-      note: `建议挂限价单在 ${fmt(entry,d)} 附近的回踩支撑位，等回踩确认再进场。止损参考更下方的结构性支撑，止盈按 1:3 盈亏比设在 ${fmt(target,d)}。${styleCompareNote(distancePct)} ${weakNote}`
+      note: `建议挂限价单在 ${fmt(entry,d)} 附近的回踩支撑位，等回踩确认再进场。止损参考更下方的结构性支撑${widened ? '（附近结构位太近，已按15m ATR放宽到最小有效距离）' : ''}。止盈参考 ${fmt(target,d)}（${source}），对应盈亏比约 1:${rr.toFixed(1)}。${styleCompareNote(distancePct)} ${weakNote}`
     };
   }
 
   const minorHighs = minor.highs.filter(h => h > price);
   const entry = minorHighs.length ? Math.min(...minorHighs) : price;
   const majorHighs = major.highs.filter(h => h > entry);
-  const stop = majorHighs.length ? Math.min(...majorHighs) : Math.max(...recent80.map(c=>c.high));
-  const distance = stop - entry;
-  const target = entry - distance * 3;
+  let stop = majorHighs.length ? Math.min(...majorHighs) : Math.max(...recent80.map(c=>c.high));
+  let distance = stop - entry;
+  let widened = false;
+  if(distance < minDistance){ stop = entry + minDistance; distance = minDistance; widened = true; }
+  const { target, source } = findTarget(entry, distance, 'short');
+  const rr = (entry - target) / distance;
   const distancePct = (distance / entry) * 100;
   return {
     dir: 'short', dirLabel: '日内做空参考',
-    confidence,
+    confidence, rr: rr.toFixed(1),
     entry: fmt(entry,d), stop: fmt(stop,d), target: fmt(target,d),
-    note: `建议挂限价单在 ${fmt(entry,d)} 附近的反抽压力位，等反抽确认再进场。止损参考更上方的结构性压力，止盈按 1:3 盈亏比设在 ${fmt(target,d)}。${styleCompareNote(distancePct)} ${weakNote}`
+    note: `建议挂限价单在 ${fmt(entry,d)} 附近的反抽压力位，等反抽确认再进场。止损参考更上方的结构性压力${widened ? '（附近结构位太近，已按15m ATR放宽到最小有效距离）' : ''}。止盈参考 ${fmt(target,d)}（${source}），对应盈亏比约 1:${rr.toFixed(1)}。${styleCompareNote(distancePct)} ${weakNote}`
   };
 }
 
@@ -560,7 +603,7 @@ async function loadData(){
     const winRate = backtest ? backtest.rate : null;
     const winRateCls = winRate === null ? 'mid' : winRate >= 55 ? 'high' : winRate >= 45 ? 'mid' : 'low';
 
-    const strategy = buildStrategy(score, periodCount, last, k5m, name, periods[1].m.rsi);
+    const strategy = buildStrategy(score, periodCount, last, k5m, k15, name, periods[1].m.rsi, periods[2].m.atr);
 
     const vwap = computeVWAP(periods[2].candles.slice(-96));
     const obvArr15 = computeOBV(periods[2].candles);
@@ -582,6 +625,31 @@ async function loadData(){
     }
     const divergence = (vp15 && vp15.cls==='neu') || (vp1h && vp1h.cls==='neu');
     if(divergence) cautionNote += ' 当前已有量价背离迹象（涨/跌但量没跟上），信号可信度打折。';
+
+    // Composite risk score: combines VWAP overextension + volume/price divergence
+    // + OBV/price direction mismatch on both timeframes. Purely a heuristic tally
+    // of the same signals already shown above, not a statistical probability.
+    const priceBeyondBand = !!(cautionUpper && cautionLower && (last >= cautionUpper || last <= cautionLower));
+    let riskScore = 0;
+    const riskReasons = [];
+    if(priceBeyondBand){ riskScore += 30; riskReasons.push('现价偏离VWAP警惕区间'); }
+    if(vp15 && vp15.cls === 'neu'){ riskScore += 20; riskReasons.push('15m量价背离'); }
+    if(vp1h && vp1h.cls === 'neu'){ riskScore += 20; riskReasons.push('1H量价背离'); }
+    if(vp15 && ((vp15.priceChangePct >= 0) !== (obvTrend15 >= 0))){ riskScore += 15; riskReasons.push('15m OBV与价格方向不一致'); }
+    if(vp1h && ((vp1h.priceChangePct >= 0) !== (obvTrend1h >= 0))){ riskScore += 15; riskReasons.push('1H OBV与价格方向不一致'); }
+    riskScore = Math.min(100, riskScore);
+    const riskCls = riskScore <= 25 ? 'risk-low' : riskScore <= 50 ? 'risk-mid' : 'risk-high';
+    const riskLabel = riskScore <= 25 ? '低' : riskScore <= 50 ? '中等' : riskScore <= 75 ? '较高' : '高';
+
+    // Dedicated divergence alert (subset of the risk factors above, price/volume
+    // and price/OBV mismatches only — surfaced on its own since it's usually the
+    // earliest warning, ahead of an actual price reversal).
+    const divergenceReasons = [];
+    if(vp15 && vp15.cls === 'neu') divergenceReasons.push('15m价涨/跌但量没跟上');
+    if(vp1h && vp1h.cls === 'neu') divergenceReasons.push('1H价涨/跌但量没跟上');
+    if(vp15 && ((vp15.priceChangePct >= 0) !== (obvTrend15 >= 0))) divergenceReasons.push('15m OBV方向与价格不一致');
+    if(vp1h && ((vp1h.priceChangePct >= 0) !== (obvTrend1h >= 0))) divergenceReasons.push('1H OBV方向与价格不一致');
+    const hasDivergence = divergenceReasons.length > 0;
 
     const now = new Date();
     const timeStr = now.toLocaleTimeString('zh-CN', {hour12:false});
@@ -634,7 +702,7 @@ async function loadData(){
         <div class="strategy-grid">
           <div class="strategy-cell"><div class="k">限价入场</div><div class="v entry">${strategy.entry}</div></div>
           <div class="strategy-cell"><div class="k">止损参考</div><div class="v stop">${strategy.stop}</div></div>
-          <div class="strategy-cell"><div class="k">止盈参考（1:3）</div><div class="v target">${strategy.target}</div></div>
+          <div class="strategy-cell"><div class="k">止盈参考（1:${strategy.rr}）</div><div class="v target">${strategy.target}</div></div>
         </div>
         <div class="winrate-row">
           <div class="k">预测胜率（15m 规则回测）<span class="sample">${backtest ? `近 ${backtest.sample} 次同类信号` : '样本不足'}</span></div>
@@ -645,6 +713,9 @@ async function loadData(){
 
       <div class="table-card">
         <div class="label">量价关系 · 15m / 1H 趋势，VWAP(15m·24h)，OBV</div>
+        <div class="divergence-alert ${hasDivergence ? 'warn' : 'ok'}">
+          ${hasDivergence ? `⚠ 检测到背离：${divergenceReasons.join('、')}` : '✓ 暂无量价背离迹象'}
+        </div>
         <div class="liq-summary" style="padding:0 6px;">
           <div class="liq-stat"><div class="k">VWAP(24h)</div><div class="v">${vwap ? fmt(vwap,d) : '—'}</div></div>
           <div class="liq-stat"><div class="k">现价 vs VWAP</div><div class="v ${vwap && last>=vwap ? 'long':'short'}">${vwap ? (last>=vwap?'高于':'低于') : '—'}</div></div>
@@ -653,10 +724,13 @@ async function loadData(){
           <div class="liq-stat"><div class="k">OBV趋势(15m)</div><div class="v ${obvTrend15>=0?'long':'short'}">${obvTrend15>=0?'走高':'走低'}</div></div>
           <div class="liq-stat"><div class="k">OBV趋势(1H)</div><div class="v ${obvTrend1h>=0?'long':'short'}">${obvTrend1h>=0?'走高':'走低'}</div></div>
         </div>
+        <div class="liq-summary" style="padding:0 6px;">
+          <div class="liq-stat"><div class="k">风险概率</div><div class="v ${riskCls}">${riskScore}%（${riskLabel}）</div></div>
+        </div>
         <div class="vp-line ${vp15 ? vp15.cls : 'neu'}"><b>15m</b>${vp15 ? `${vp15.label}（价格${vp15.priceChangePct>=0?'+':''}${vp15.priceChangePct.toFixed(2)}%，量${vp15.volChangePct>=0?'+':''}${vp15.volChangePct.toFixed(1)}%）` : '15m样本不足'}</div>
         <div class="vp-line ${vp1h ? vp1h.cls : 'neu'}"><b>1H</b>${vp1h ? `${vp1h.label}（价格${vp1h.priceChangePct>=0?'+':''}${vp1h.priceChangePct.toFixed(2)}%，量${vp1h.volChangePct>=0?'+':''}${vp1h.volChangePct.toFixed(1)}%）` : '1H样本不足'}</div>
         <div class="strategy-note" style="padding:0 6px;">
-          ${cautionNote}
+          ${riskReasons.length ? `触发因素：${riskReasons.join('、')}。` : '暂无明显风险触发因素。'} ${cautionNote}
         </div>
       </div>
 
@@ -817,6 +891,20 @@ function renderBookSide(levels, side, maxSize, dd){
   }).join('');
 }
 
+const COINGLASS_KEY = 'a300ee0a5fde4de5a1a2ec69a783b762';
+
+async function fetchAggBook(name){
+  const url = `https://open-api-v4.coinglass.com/api/futures/orderbook/aggregated-ask-bids-history?exchange_list=Binance,OKX,Bybit&symbol=${name}&interval=15m&limit=1&range=1`;
+  const res = await fetch(url, { headers: { 'CG-API-KEY': COINGLASS_KEY, accept: 'application/json' } });
+  if(!res.ok) throw new Error('request failed');
+  const json = await res.json();
+  if(json.code !== '0') throw new Error(json.msg || 'error');
+  const point = json.data[json.data.length-1];
+  const bid = Number(point.aggregatedBidsUsd ?? point.bidsUsd ?? point.bidUsd ?? point.buyUsd ?? 0);
+  const ask = Number(point.aggregatedAsksUsd ?? point.asksUsd ?? point.askUsd ?? point.sellUsd ?? 0);
+  return { bid, ask };
+}
+
 async function loadOrderBook(){
   const el = document.getElementById('obContent');
   try{
@@ -831,11 +919,26 @@ async function loadOrderBook(){
       .sort((a,b) => b[0]-a[0]).slice(0, 12);
 
     const maxSize = Math.max(...[...askBuckets,...bidBuckets].map(x => x[1]), 1);
+
+    let aggHtml = '';
+    try{
+      const agg = await fetchAggBook(state.name);
+      aggHtml = `
+        <div class="liq-summary">
+          <div class="liq-stat"><div class="k">跨交易所买盘(±1%)</div><div class="v long">$${fmtUsd(agg.bid)}</div></div>
+          <div class="liq-stat"><div class="k">跨交易所卖盘(±1%)</div><div class="v short">$${fmtUsd(agg.ask)}</div></div>
+        </div>
+      `;
+    } catch(aggErr){
+      aggHtml = `<div class="liq-empty">跨交易所汇总数据暂不可用（${aggErr.message}）。</div>`;
+    }
+
     el.innerHTML = `
-      <div class="liq-empty">卖盘（按约 ${(BOOK_BUCKET_PCT*100).toFixed(2)}% 价位聚合）</div>
+      ${aggHtml}
+      <div class="liq-empty">卖盘（按约 ${(BOOK_BUCKET_PCT*100).toFixed(2)}% 价位聚合，OKX）</div>
       ${renderBookSide(askBuckets, 'above', maxSize, dd)}
       <div class="liq-cur">中间价 ${fmt(mid, dd)}</div>
-      <div class="liq-empty">买盘（按约 ${(BOOK_BUCKET_PCT*100).toFixed(2)}% 价位聚合）</div>
+      <div class="liq-empty">买盘（按约 ${(BOOK_BUCKET_PCT*100).toFixed(2)}% 价位聚合，OKX）</div>
       ${renderBookSide(bidBuckets, 'below', maxSize, dd)}
     `;
   } catch(err){
