@@ -947,7 +947,15 @@ async function loadData(){
         const key = outcome === 'win' ? 'wins' : outcome === 'breakeven' ? 'breakevens' : 'losses';
         stratStats = { ...stratStats, [key]: (stratStats[key]||0) + 1 };
         saveStratStats(name, stratStats);
-        tradeLog = [...tradeLog, { result: outcome, reason, closedAt: Date.now() }].slice(-500);
+        tradeLog = [...tradeLog, {
+          result: outcome, reason, closedAt: Date.now(),
+          dir: stratState.dir,
+          entry: stratState.rawEntry,
+          exit: last,
+          target: stratState.rawTarget,
+          stop: stratState.rawStop,
+          openedAt: stratState.activatedAt || stratState.createdAt,
+        }].slice(-500);
         saveTradeLog(name, tradeLog);
         syncCloud();
         // Don't redeploy immediately — sit out until sentiment/technicals
@@ -990,6 +998,9 @@ async function loadData(){
     const statsDay = windowStats(tradeLog, 24*60*60*1000);
     const statsWeek = windowStats(tradeLog, 7*24*60*60*1000);
     const statsMonth = windowStats(tradeLog, 30*24*60*60*1000);
+    const recentTrades = [...tradeLog].sort((a,b) => b.closedAt - a.closedAt).slice(0, 10);
+    const acctCfg = loadAccountCfg();
+    const equity = computeEquity(tradeLog, acctCfg);
 
     const now = new Date();
     const timeStr = now.toLocaleTimeString('zh-CN', {hour12:false});
@@ -1079,6 +1090,64 @@ async function loadData(){
           <div class="liq-stat"><div class="k">近30天</div><div class="v ${statsMonth.rate===null?'mid':statsMonth.rate>=55?'high':statsMonth.rate>=45?'mid':'low'}">${statsMonth.rate===null?'—':statsMonth.rate.toFixed(0)+'%'}</div></div>
         </div>
         <div class="strategy-note" style="padding:0 6px;">近24小时 ${statsDay.wins}胜${statsDay.losses}负${statsDay.breakevens?`${statsDay.breakevens}保本`:''}，近7天 ${statsWeek.wins}胜${statsWeek.losses}负${statsWeek.breakevens?`${statsWeek.breakevens}保本`:''}，近30天 ${statsMonth.wins}胜${statsMonth.losses}负${statsMonth.breakevens?`${statsMonth.breakevens}保本`:''}。胜率不计保本单。样本积累需要时间，刚开始用的时候几个窗口都可能是"—"，正常。</div>
+      </div>
+
+      <div class="table-card">
+        <div class="label">模拟账户 · ${name}（初始 ${ACCOUNT_INITIAL} USDT · ${acctCfg.leverage}x · 每单 ${acctCfg.marginPct}% 保证金）</div>
+        <div class="liq-summary" style="padding:0 6px;">
+          <div class="liq-stat"><div class="k">剩余资金</div><div class="v ${equity.balance>=ACCOUNT_INITIAL?'long':'short'}">${equity.balance.toFixed(2)}</div></div>
+          <div class="liq-stat"><div class="k">累计盈亏</div><div class="v ${equity.net>=0?'long':'short'}">${equity.net>=0?'+':''}${equity.net.toFixed(2)}</div></div>
+          <div class="liq-stat"><div class="k">收益率</div><div class="v ${equity.netPct>=0?'long':'short'}">${equity.netPct>=0?'+':''}${equity.netPct.toFixed(1)}%</div></div>
+        </div>
+        <div class="liq-summary" style="padding:0 6px;">
+          <div class="liq-stat"><div class="k">累计手续费</div><div class="v short">-${equity.totalFees.toFixed(2)}</div></div>
+          <div class="liq-stat"><div class="k">最大回撤</div><div class="v ${equity.maxDD>=30?'short':''}">${equity.maxDD.toFixed(1)}%</div></div>
+          <div class="liq-stat"><div class="k">计入单数</div><div class="v">${equity.priced}</div></div>
+        </div>
+        ${equity.liquidated ? '<div class="divergence-alert warn">⚠ 模拟账户已爆仓（余额归零）。这说明在当前杠杆和仓位设置下，这套策略的连续亏损足以打光本金——真实交易里同样的事会发生在你的真钱上。</div>' : ''}
+        <button class="reset-stats-btn" onclick="promptAccountCfg()">调整杠杆 / 仓位</button>
+        <div class="strategy-note" style="padding:0 6px;">
+          每单保证金 = 当前余额 × ${acctCfg.marginPct}%，名义仓位 = 保证金 × ${acctCfg.leverage}倍。手续费按 OKX 永续标准费率计算：开仓挂限价单按 maker ${(FEE_MAKER*100).toFixed(3)}%，止盈止损平仓按 taker ${(FEE_TAKER*100).toFixed(3)}%（保守估计），双边合计每笔约 ${((FEE_MAKER+FEE_TAKER)*100).toFixed(3)}% 名义价值。
+          余额由交易记录实时推演得出，不单独存储，所以多设备同步后结果一致。只有带开平仓价的记录才计入（${equity.priced}/${tradeLog.length} 笔）。
+        </div>
+      </div>
+
+      <div class="table-card">
+        <div class="label">历史订单 · ${name} 最近 10 笔</div>
+        ${recentTrades.length === 0 ? '<div class="liq-empty" style="padding:0 6px;">还没有已结算的订单。等锁单机制跑完第一单后会出现在这里。</div>' : `
+        <table>
+          <thead><tr>
+            <th>时间</th><th>方向</th><th>开仓</th><th>平仓</th><th>盈亏%</th><th>盈亏(U)</th><th>手续费</th><th>余额</th><th>结果</th>
+          </tr></thead>
+          <tbody>
+            ${recentTrades.map(t => {
+              const hasPx = typeof t.entry === 'number' && typeof t.exit === 'number';
+              const pnlPct = hasPx && t.entry
+                ? (t.dir === 'long' ? (t.exit - t.entry)/t.entry : (t.entry - t.exit)/t.entry) * 100
+                : null;
+              const money = equity.byTrade.get(t.closedAt) || null;
+              const resCls = t.result === 'win' ? 'long' : t.result === 'loss' ? 'short' : 'flat';
+              const resTxt = REASON_LABEL[t.reason] || (t.result==='win'?'止盈':t.result==='loss'?'止损':'保本');
+              const tm = new Date(t.closedAt);
+              const tmTxt = `${(tm.getMonth()+1)}/${tm.getDate()} ${String(tm.getHours()).padStart(2,'0')}:${String(tm.getMinutes()).padStart(2,'0')}`;
+              return `
+                <tr>
+                  <td>${tmTxt}</td>
+                  <td><span class="dir ${t.dir === 'long' ? 'long' : 'short'}">${t.dir === 'long' ? '做多' : t.dir === 'short' ? '做空' : '—'}</span></td>
+                  <td>${hasPx ? fmt(t.entry, d) : '—'}</td>
+                  <td>${hasPx ? fmt(t.exit, d) : '—'}</td>
+                  <td style="color:${pnlPct===null?'var(--text-dim)':pnlPct>=0?'var(--pos)':'var(--neg)'}">${pnlPct===null?'—':(pnlPct>=0?'+':'')+pnlPct.toFixed(2)+'%'}</td>
+                  <td style="color:${!money?'var(--text-dim)':money.net>=0?'var(--pos)':'var(--neg)'}">${!money?'—':(money.net>=0?'+':'')+money.net.toFixed(2)}</td>
+                  <td style="color:var(--text-dim)">${!money?'—':'-'+money.fees.toFixed(2)}</td>
+                  <td>${!money?'—':money.balanceAfter.toFixed(2)}</td>
+                  <td><span class="dir ${resCls}">${resTxt}</span></td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+        <div class="strategy-note" style="padding:8px 6px 0;">盈亏(U) 为扣除手续费后的净额，按该笔成交时的账户余额和 ${acctCfg.leverage}x / ${acctCfg.marginPct}% 仓位推算；余额为该笔结算后的账户资金。盈亏% 为纯价格变动幅度，未计杠杆。早期记录可能缺少开平仓价（该功能上线前产生的单子只存了胜负）。</div>
+        `}
       </div>
 
       <div class="table-card">
@@ -1713,6 +1782,66 @@ async function syncCloud(){
   } finally {
     jbSyncing = false;
   }
+}
+
+// ---- Simulated account equity ----
+// Each coin starts at 100 USDT. Balance is *derived* by replaying the trade log
+// rather than stored, so it stays consistent across devices for free (the log
+// is what syncs) and can never drift out of step with the recorded history.
+// OKX perpetual base-tier fees: maker 0.02%, taker 0.05%. Entry is a resting
+// limit order (maker); exits at stop/target are modelled as taker, the
+// conservative assumption.
+const FEE_MAKER = 0.0002;
+const FEE_TAKER = 0.0005;
+const ACCOUNT_INITIAL = 100;
+
+function loadAccountCfg(){
+  try{
+    const raw = localStorage.getItem('qm_accountCfg');
+    return raw ? JSON.parse(raw) : { leverage: 50, marginPct: 20 };
+  } catch(e){ return { leverage: 50, marginPct: 20 }; }
+}
+function saveAccountCfg(cfg){
+  try{ localStorage.setItem('qm_accountCfg', JSON.stringify(cfg)); } catch(e){ /* ignore */ }
+}
+function promptAccountCfg(){
+  const cfg = loadAccountCfg();
+  const lev = prompt('杠杆倍数（OKX永续，如 50）：', cfg.leverage);
+  if(lev === null) return;
+  const mp = prompt('每单动用保证金占当前余额的百分比（如 20 表示两成仓）：', cfg.marginPct);
+  if(mp === null) return;
+  const nLev = Math.max(1, Math.min(125, Number(lev) || cfg.leverage));
+  const nMp  = Math.max(1, Math.min(100, Number(mp) || cfg.marginPct));
+  saveAccountCfg({ leverage: nLev, marginPct: nMp });
+  loadData();
+}
+
+function computeEquity(log, cfg){
+  let balance = ACCOUNT_INITIAL, peak = ACCOUNT_INITIAL, maxDD = 0;
+  let totalFees = 0, totalGross = 0, priced = 0;
+  const byTrade = new Map(); // closedAt -> per-trade money breakdown
+  for(const t of log){
+    if(balance <= 0) break;
+    if(typeof t.entry !== 'number' || typeof t.exit !== 'number' || !t.entry) continue;
+    priced++;
+    const margin   = balance * cfg.marginPct / 100;
+    const notional = margin * cfg.leverage;
+    const pct = t.dir === 'long' ? (t.exit - t.entry)/t.entry : (t.entry - t.exit)/t.entry;
+    const gross = notional * pct;
+    const fees  = notional * (FEE_MAKER + FEE_TAKER);
+    const net   = gross - fees;
+    balance = Math.max(0, balance + net);
+    byTrade.set(t.closedAt, { gross, fees, net, notional, balanceAfter: balance });
+    totalGross += gross; totalFees += fees;
+    peak = Math.max(peak, balance);
+    if(peak > 0) maxDD = Math.max(maxDD, (peak - balance)/peak*100);
+  }
+  return {
+    balance, peak, maxDD, totalFees, totalGross, priced, byTrade,
+    net: balance - ACCOUNT_INITIAL,
+    netPct: (balance - ACCOUNT_INITIAL)/ACCOUNT_INITIAL*100,
+    liquidated: balance <= 0,
+  };
 }
 
 function setConnStatus(ok, text){
