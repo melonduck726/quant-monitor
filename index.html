@@ -1169,7 +1169,7 @@ async function loadData(){
           <div class="k">累计实盘统计（本机记录，${name}）<span class="sample">${stratTotal} 单：${stratWins} 胜 ${stratLosses} 负${stratBreakevens?` ${stratBreakevens} 保本`:''}（胜率不计保本单）</span></div>
           <div class="v ${stratWinRate===null?'mid':stratWinRate>=55?'high':stratWinRate>=45?'mid':'low'}">${stratWinRate===null?'—':stratWinRate.toFixed(0)+'%'}</div>
         </div>
-        <button class="reset-stats-btn" onclick="cancelStrategy('${name}'); loadData();">取消当前策略</button>
+        <button class="reset-stats-btn" onclick="cancelStrategy('${name}'); syncCloud().then(loadData);">取消当前策略</button>
         <button class="reset-stats-btn" onclick="resetStratStats('${name}'); loadData();">重置${name}统计</button>
         <div class="strategy-note">${strategy.note}</div>
         `}
