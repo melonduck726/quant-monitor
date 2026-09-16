@@ -1085,7 +1085,7 @@ async function loadData(){
     }
     const hourly = hourlyStats(tradeLog);
     const recentTrades = [...tradeLog].sort((a,b) => b.closedAt - a.closedAt).slice(0, 10);
-    const acctCfg = loadAccountCfg();
+    const acctCfg = loadAccountCfg(name);
     const equity = computeEquity(tradeLog, acctCfg);
 
     const now = new Date();
@@ -1225,7 +1225,7 @@ async function loadData(){
           <div class="liq-stat"><div class="k">计入单数</div><div class="v">${equity.priced}</div></div>
         </div>
         ${equity.liquidated ? '<div class="divergence-alert warn">⚠ 模拟账户已爆仓（余额归零）。这说明在当前杠杆和仓位设置下，这套策略的连续亏损足以打光本金——真实交易里同样的事会发生在你的真钱上。</div>' : ''}
-        <button class="reset-stats-btn" onclick="promptAccountCfg()">调整杠杆 / 仓位</button>
+        <button class="reset-stats-btn" onclick="promptAccountCfg('${name}')">调整${name}杠杆/仓位</button>
         <div class="strategy-note" style="padding:0 6px;">
           每单保证金 = 当前余额 × ${acctCfg.marginPct}%，名义仓位 = 保证金 × ${acctCfg.leverage}倍。手续费按 OKX 永续标准费率计算：开仓挂限价单按 maker ${(FEE_MAKER*100).toFixed(3)}%，止盈止损平仓按 taker ${(FEE_TAKER*100).toFixed(3)}%（保守估计），双边合计每笔约 ${((FEE_MAKER+FEE_TAKER)*100).toFixed(3)}% 名义价值。
           余额由交易记录实时推演得出，不单独存储，所以多设备同步后结果一致。只有带开平仓价的记录才计入（${equity.priced}/${tradeLog.length} 笔）。
@@ -1933,24 +1933,28 @@ const ACCOUNT_INITIAL = 100;
 // Minimum sit-out after any close before a new suggestion may be issued.
 const COOLDOWN_MS = 10 * 60 * 1000;
 
-function loadAccountCfg(){
+function loadAccountCfg(symbol){
   try{
-    const raw = localStorage.getItem('qm_accountCfg');
-    return raw ? JSON.parse(raw) : { leverage: 50, marginPct: 20 };
+    const raw = localStorage.getItem(`qm_accountCfg_${symbol}`);
+    if(raw) return JSON.parse(raw);
+    // one-time migration from the old shared (non-per-symbol) setting, if present
+    const legacy = localStorage.getItem('qm_accountCfg');
+    if(legacy) return JSON.parse(legacy);
+    return { leverage: 50, marginPct: 20 };
   } catch(e){ return { leverage: 50, marginPct: 20 }; }
 }
-function saveAccountCfg(cfg){
-  try{ localStorage.setItem('qm_accountCfg', JSON.stringify(cfg)); } catch(e){ /* ignore */ }
+function saveAccountCfg(symbol, cfg){
+  try{ localStorage.setItem(`qm_accountCfg_${symbol}`, JSON.stringify(cfg)); } catch(e){ /* ignore */ }
 }
-function promptAccountCfg(){
-  const cfg = loadAccountCfg();
-  const lev = prompt('杠杆倍数（OKX永续，如 50）：', cfg.leverage);
+function promptAccountCfg(symbol){
+  const cfg = loadAccountCfg(symbol);
+  const lev = prompt(`${symbol} 杠杆倍数（OKX永续，如 50）：`, cfg.leverage);
   if(lev === null) return;
-  const mp = prompt('每单动用保证金占当前余额的百分比（如 20 表示两成仓）：', cfg.marginPct);
+  const mp = prompt(`${symbol} 每单动用保证金占当前余额的百分比（如 20 表示两成仓）：`, cfg.marginPct);
   if(mp === null) return;
   const nLev = Math.max(1, Math.min(125, Number(lev) || cfg.leverage));
   const nMp  = Math.max(1, Math.min(100, Number(mp) || cfg.marginPct));
-  saveAccountCfg({ leverage: nLev, marginPct: nMp });
+  saveAccountCfg(symbol, { leverage: nLev, marginPct: nMp });
   loadData();
 }
 
