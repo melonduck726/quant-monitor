@@ -443,6 +443,12 @@ function resetStratStats(symbol){
   saveStratState(symbol, null);
   saveTradeLog(symbol, []);
 }
+// Manual cancel: drop the current suggestion/position without recording a
+// win or loss, and drop into cooldown so the normal "wait for things to
+// stabilize" gate applies before a new suggestion is issued.
+function cancelStrategy(symbol){
+  saveStratState(symbol, { status: 'cooldown', lastOutcome: 'cancelled', lastReason: 'cancelled', closedAt: Date.now() });
+}
 function loadTradeLog(symbol){
   try{
     const raw = localStorage.getItem(`qm_tradeLog_${symbol}`);
@@ -864,7 +870,7 @@ async function loadData(){
     const stratBreakevens = stratStats.breakevens || 0;
     const stratTotal = stratWins + stratLosses + stratBreakevens;
     const stratWinRate = (stratWins + stratLosses) > 0 ? (stratWins / (stratWins + stratLosses) * 100) : null;
-    const REASON_LABEL = { target: '止盈到位', exhaustion: '动能衰竭提前止盈', trailed: '移动止损锁盈', breakeven: '保本出场', stop: '止损' };
+    const REASON_LABEL = { target: '止盈到位', exhaustion: '动能衰竭提前止盈', trailed: '移动止损锁盈', breakeven: '保本出场', stop: '止损', cancelled: '手动取消' };
     const statusLabel = !strategy ? '观望中，等待情绪与技术面企稳后再布局'
       : strategy.status === 'active' ? `持仓中${strategy.stopStage==='trailing' ? '（止损已上移锁盈）' : strategy.stopStage==='breakeven' ? '（止损已移至保本位）' : ''}，等待触及止损/止盈`
       : '待入场，等待价格触达限价位';
@@ -935,7 +941,7 @@ async function loadData(){
           <div class="strategy-dir flat">观望中</div>
         </div>
         <div class="status-badge cooldown">○ 观望中<span>${statusLabel}</span></div>
-        <div class="strategy-note">上一单${REASON_LABEL[stratState.lastReason] || (stratState.lastOutcome==='win'?'止盈':stratState.lastOutcome==='breakeven'?'保本':'止损')}平仓后进入观望，等多周期信号强度回到"中"或以上、且量价风险概率降到50以下再重新布局，避免刚止损/止盈完就立刻反手追进去。（当前：信号强度${strategyConfidence(score, periodCount)}，风险概率${riskScore}%）</div>
+        <div class="strategy-note">${stratState.lastReason === 'cancelled' ? '已手动取消策略（未计入胜负统计）' : `上一单${REASON_LABEL[stratState.lastReason] || (stratState.lastOutcome==='win'?'止盈':stratState.lastOutcome==='breakeven'?'保本':'止损')}平仓`}后进入观望，等多周期信号强度回到"中"或以上、且量价风险概率降到50以下再重新布局，避免刚止损/止盈完就立刻反手追进去。（当前：信号强度${strategyConfidence(score, periodCount)}，风险概率${riskScore}%）</div>
         ` : `
         <div class="strategy-head">
           <div class="strategy-dir ${strategy.dir}">${strategy.dirLabel}</div>
@@ -959,6 +965,7 @@ async function loadData(){
           <div class="k">累计实盘统计（本机记录，${name}）<span class="sample">${stratTotal} 单：${stratWins} 胜 ${stratLosses} 负${stratBreakevens?` ${stratBreakevens} 保本`:''}（胜率不计保本单）</span></div>
           <div class="v ${stratWinRate===null?'mid':stratWinRate>=55?'high':stratWinRate>=45?'mid':'low'}">${stratWinRate===null?'—':stratWinRate.toFixed(0)+'%'}</div>
         </div>
+        <button class="reset-stats-btn" onclick="cancelStrategy('${name}'); loadData();">取消当前策略</button>
         <button class="reset-stats-btn" onclick="resetStratStats('${name}'); loadData();">重置${name}统计</button>
         <div class="strategy-note">${strategy.note}</div>
         `}
