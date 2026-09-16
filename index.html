@@ -31,9 +31,79 @@
   }
   .wrap{ max-width: 640px; margin: 0 auto; }
 
-  .top{ display:flex; align-items:baseline; justify-content:space-between; margin-bottom:18px; flex-wrap:wrap; gap:8px;}
-  .top h1{ font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
-  .top .sub{ color: var(--text-dim); font-size: 12.5px; }
+  /* ---- responsive: widen and go multi-column on larger screens ---- */
+  @media (min-width: 820px){
+    body{ padding: 32px 28px 80px; }
+    .wrap{ max-width: 1180px; }
+    .two-col{ display:grid; grid-template-columns: 1fr 1fr; gap:14px; align-items:start; }
+    .tabs{ max-width: 460px; }
+  }
+  @media (min-width: 1200px){
+    .wrap{ max-width: 1320px; }
+  }
+
+  .section-title{
+    font-size:13px; font-weight:600; color: var(--text); letter-spacing:0.02em;
+    margin: 22px 2px 12px; display:flex; align-items:baseline; gap:8px;
+  }
+  .section-title span{
+    font-family:'IBM Plex Mono', monospace; font-size:10.5px;
+    color: var(--text-dim); font-weight:400; letter-spacing:0.08em;
+  }
+
+  .conn-status{
+    display:flex; align-items:center; gap:6px; font-family:'IBM Plex Mono', monospace;
+    font-size:11px; color: var(--text-dim); white-space:nowrap;
+  }
+  .conn-status i{ width:7px; height:7px; border-radius:50%; background: var(--text-dim); display:inline-block; }
+  .conn-status.ok i{ background: var(--pos); box-shadow: 0 0 6px rgba(52,211,153,0.7); }
+  .conn-status.err i{ background: var(--neg); }
+
+  .banner{
+    background: linear-gradient(90deg, rgba(201,168,76,0.12), rgba(201,168,76,0.02));
+    border-left: 3px solid var(--neutral); border-radius: 0 8px 8px 0;
+    padding: 10px 14px; font-size: 12px; color: var(--text-dim); line-height:1.6;
+    margin-bottom: 4px;
+  }
+
+  .overview-grid{ display:grid; grid-template-columns: 1fr; gap:12px; }
+  @media (min-width: 720px){
+    .overview-grid{ grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  }
+  .ov-card{
+    background: var(--surface); border:1px solid var(--border); border-radius:14px;
+    padding: 18px 18px 16px; cursor:pointer; transition: border-color .15s ease;
+  }
+  .ov-card:hover{ border-color: #33406b; }
+  .ov-card.selected{ border-color: var(--eth); }
+  .ov-head{ display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+  .ov-head .ov-icon{ width:28px; height:28px; border-radius:50%; }
+  .ov-head .ov-name{ font-weight:700; font-size:14px; }
+  .ov-head .ov-sub{ color: var(--text-dim); font-size:11px; }
+  .ov-price-row{ display:flex; align-items:baseline; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
+  .ov-price{ font-family:'IBM Plex Mono', monospace; font-size:26px; font-weight:600; }
+  .ov-chg{ font-family:'IBM Plex Mono', monospace; font-size:13px; font-weight:600; }
+  .ov-chg.up{ color: var(--pos); } .ov-chg.down{ color: var(--neg); }
+
+  .ov-score-row{ display:flex; align-items:center; gap:14px; margin-bottom:14px; }
+  .ov-score{ font-family:'IBM Plex Mono', monospace; font-size:38px; font-weight:700; line-height:1; }
+  .ov-score small{ font-size:14px; color: var(--text-dim); font-weight:400; }
+  .ov-verdict{ font-size:15px; font-weight:700; }
+  .ov-verdict small{ display:block; font-size:11px; color: var(--text-dim); font-weight:400; margin-top:3px; }
+  .score-bull{ color: var(--pos); } .score-bear{ color: var(--neg); } .score-flat{ color: var(--neutral); }
+
+  .ov-bar{ height:7px; background:#1c2440; border-radius:4px; overflow:hidden; margin-bottom:14px; }
+  .ov-bar i{ display:block; height:100%; border-radius:4px; }
+
+  .ov-breakdown{ display:grid; grid-template-columns: repeat(4,1fr); gap:8px; margin-bottom:12px; }
+  .ov-item{ text-align:center; background: var(--surface-2); border-radius:8px; padding:8px 4px; }
+  .ov-item .k{ font-size:10.5px; color: var(--text-dim); margin-bottom:3px; }
+  .ov-item .v{ font-family:'IBM Plex Mono', monospace; font-size:12.5px; font-weight:600; }
+  .ov-explain{ font-size:12px; color: var(--text-dim); line-height:1.65; }
+
+  .top{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; flex-wrap:wrap; gap:10px;}
+  .top h1{ font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+  .top .sub{ color: var(--text-dim); font-size: 12.5px; margin-top:3px; }
 
   .tabs{ display:flex; gap:8px; margin-bottom:16px; }
   .tab{
@@ -218,10 +288,23 @@
 <body>
 <div class="wrap">
   <div class="top">
-    <h1>多周期实时监测</h1>
-    <div class="sub">数据源 · OKX 永续行情 · 短线模式</div>
+    <div>
+      <h1>趋势镜</h1>
+      <div class="sub">看清趋势，再慢慢理解市场</div>
+    </div>
+    <div class="conn-status" id="connStatus"><i></i>连接中…</div>
   </div>
 
+  <div class="banner">
+    已连接 OKX 公开永续行情。价格与指标每 2 秒更新，评分随行情实时重算。仅供研究参考，不构成投资建议。
+  </div>
+
+  <div class="section-title">市场概览 <span>MARKET OVERVIEW</span></div>
+  <div class="overview-grid" id="overviewGrid">
+    <div class="loading">正在加载市场概览…</div>
+  </div>
+
+  <div class="section-title">详细分析 <span>DETAIL</span></div>
   <div class="tabs">
     <div class="tab active btc" data-inst="BTC-USDT-SWAP" data-name="BTC" id="tabBTC"><img class="coin-icon" src="https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/32/color/btc.png" alt="" onerror="this.style.display='none'">BTC</div>
     <div class="tab eth" data-inst="ETH-USDT-SWAP" data-name="ETH" id="tabETH"><img class="coin-icon" src="https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/32/color/eth.png" alt="" onerror="this.style.display='none'">ETH</div>
@@ -237,14 +320,16 @@
     <div class="loading">正在加载行情数据…</div>
   </div>
 
-  <div class="liq-card">
-    <div class="label">清算图 · OKX 永续强平</div>
-    <div id="liqContent"><div class="liq-empty">正在加载清算数据…</div></div>
-  </div>
+  <div class="two-col">
+    <div class="liq-card">
+      <div class="label">清算图 · OKX 永续强平</div>
+      <div id="liqContent"><div class="liq-empty">正在加载清算数据…</div></div>
+    </div>
 
-  <div class="liq-card">
-    <div class="label">盘口挂单 · OKX 实时深度</div>
-    <div id="obContent"><div class="liq-empty">正在加载盘口数据…</div></div>
+    <div class="liq-card">
+      <div class="label">盘口挂单 · OKX 实时深度</div>
+      <div id="obContent"><div class="liq-empty">正在加载盘口数据…</div></div>
+    </div>
   </div>
 
   <div class="liq-card">
@@ -261,7 +346,7 @@
   </div>
 
   <div class="footnote">
-    指标覆盖 1m / 5m / 15m / 30m / 1H / 4H 六个周期，均为OKX原生K线周期实时计算，EMA20/EMA60/RSI14/MACD柱/ATR14。策略参考价基于 ATR 波动率测算，胜率为近期历史信号回测统计，非未来保证。均为技术指标概率倾向，不构成投资建议，请自行控制仓位与风险。消息面标签为关键词粗略情绪判断，非专业情绪分析。
+    趋势评分为可解释规则加权（均线40 / 动能25 / 强弱20 / 量价15），非黑盒模型。指标覆盖 1m / 5m / 15m / 30m / 1H / 4H 六个周期，均为OKX原生K线周期实时计算。策略与胜率均为历史统计与技术指标概率倾向，<b>仅供研究，不构成投资建议</b>，请自行控制仓位与风险，避免高杠杆重仓。消息面标签为关键词粗略情绪判断，非专业情绪分析。
   </div>
 </div>
 
@@ -894,6 +979,7 @@ async function loadData(){
 
     const now = new Date();
     const timeStr = now.toLocaleTimeString('zh-CN', {hour12:false});
+    setConnStatus(true, `REST 实时轮询 · OKX · ${timeStr}`);
 
     content.innerHTML = `
       <div class="price-card">
@@ -1027,6 +1113,7 @@ async function loadData(){
       </div>
     `;
   } catch(err){
+    setConnStatus(false, '连接异常，正在重试');
     content.innerHTML = `<div class="err">行情数据加载失败：${err.message}。稍后会自动重试，也可点击"立即刷新"。</div>`;
   }
 }
@@ -1323,6 +1410,118 @@ async function loadNews(){
   }
 }
 
+// Explainable trend score, 0-100, weighted from four named components so the
+// number can always be traced back to what produced it (no black box).
+//   均线 40 · 动能 25 · 强弱 20 · 量价 15   — neutral market lands near 50.
+function computeTrendScore(m15, m1h, vp15){
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  // 均线/40 — EMA20 vs EMA60 separation on 15m and 1H, 20 pts each.
+  const sep15 = m15.ema60 ? (m15.ema20 - m15.ema60) / m15.ema60 * 100 : 0;
+  const sep1h = m1h.ema60 ? (m1h.ema20 - m1h.ema60) / m1h.ema60 * 100 : 0;
+  const ma = clamp(10 + sep15*10, 0, 20) + clamp(10 + sep1h*10, 0, 20);
+
+  // 动能/25 — MACD histogram scaled by that timeframe's own ATR.
+  const mac15 = m15.atr ? m15.macd / m15.atr : 0;
+  const mac1h = m1h.atr ? m1h.macd / m1h.atr : 0;
+  const mom = clamp(6.25 + mac15*12.5, 0, 12.5) + clamp(6.25 + mac1h*12.5, 0, 12.5);
+
+  // 强弱/20 — RSI level on both timeframes, 10 pts each.
+  const str = clamp(m15.rsi/10, 0, 10) + clamp(m1h.rsi/10, 0, 10);
+
+  // 量价/15 — healthy trend = full marks, divergence = neutral, contra = zero.
+  const vp = !vp15 ? 7.5 : vp15.cls === 'pos' ? 15 : vp15.cls === 'neg' ? 0 : 7.5;
+
+  const total = ma + mom + str + vp;
+  return { total, ma, mom, str, vp, sep15, sep1h };
+}
+
+function scoreVerdict(total){
+  if(total >= 75) return { label: '多头', cls: 'score-bull' };
+  if(total >= 60) return { label: '偏多', cls: 'score-bull' };
+  if(total >= 40) return { label: '震荡', cls: 'score-flat' };
+  if(total >= 25) return { label: '偏空', cls: 'score-bear' };
+  return { label: '空头', cls: 'score-bear' };
+}
+
+// Plain-language reading of what drove the score, in the same four buckets.
+function explainScore(s, m15, m1h, vp15){
+  const parts = [];
+  parts.push(s.ma >= 26 ? '均线多头排列' : s.ma <= 14 ? '均线空头排列' : '均线方向不一致');
+  parts.push(s.mom >= 16 ? '动能偏强' : s.mom <= 9 ? '动能偏弱' : '动能中性');
+  parts.push(m15.rsi >= 70 ? '短周期已超买' : m15.rsi <= 30 ? '短周期已超卖' : m15.rsi >= 55 ? '短期强势' : m15.rsi <= 45 ? '短期弱势' : '强弱均衡');
+  parts.push(!vp15 ? '量价数据不足' : vp15.cls === 'pos' ? '成交量配合良好' : vp15.cls === 'neg' ? '成交量反向放大' : '成交量未明显放大');
+  return parts.join('，') + '。';
+}
+
+async function loadOverview(){
+  const grid = document.getElementById('overviewGrid');
+  const coins = [
+    { name: 'BTC', inst: 'BTC-USDT-SWAP' },
+    { name: 'ETH', inst: 'ETH-USDT-SWAP' },
+    { name: 'ZEC', inst: 'ZEC-USDT-SWAP' },
+  ];
+  try{
+    const results = await Promise.all(coins.map(async c => {
+      const [ticker, k15, k1h] = await Promise.all([
+        fetchTicker(c.inst),
+        fetchCandles(c.inst, '15m', 200),
+        fetchCandles(c.inst, '1H', 120),
+      ]);
+      const m15 = computeMetrics(k15);
+      const m1h = computeMetrics(k1h);
+      const vp15 = volumePriceVerdict(k15);
+      const s = computeTrendScore(m15, m1h, vp15);
+      const last = parseFloat(ticker.last);
+      const open24h = parseFloat(ticker.open24h);
+      const change = open24h ? ((last-open24h)/open24h*100) : 0;
+      return { ...c, last, change, s, m15, m1h, vp15 };
+    }));
+
+    grid.innerHTML = results.map(r => {
+      const v = scoreVerdict(r.s.total);
+      const d = decimals(r.name);
+      const barColor = r.s.total >= 60 ? 'var(--pos)' : r.s.total >= 40 ? 'var(--neutral)' : 'var(--neg)';
+      return `
+        <div class="ov-card ${state.name===r.name?'selected':''}" onclick="switchTab('${r.inst}','${r.name}','${r.name.toLowerCase()}')">
+          <div class="ov-head">
+            <img class="ov-icon" src="${COIN_ICONS[r.name]}" alt="" onerror="this.style.display='none'">
+            <div>
+              <div class="ov-name">${r.name} / USDT</div>
+              <div class="ov-sub">OKX 永续</div>
+            </div>
+          </div>
+          <div class="ov-price-row">
+            <div class="ov-price">${fmt(r.last, d)}</div>
+            <div class="ov-chg ${r.change>=0?'up':'down'}">${r.change>=0?'+':''}${r.change.toFixed(2)}% 过去24小时</div>
+          </div>
+          <div class="ov-score-row">
+            <div class="ov-score ${v.cls}">${r.s.total.toFixed(0)}<small> / 100</small></div>
+            <div class="ov-verdict ${v.cls}">${v.label}<small>15m + 1H 综合趋势评分</small></div>
+          </div>
+          <div class="ov-bar"><i style="width:${r.s.total}%; background:${barColor};"></i></div>
+          <div class="ov-breakdown">
+            <div class="ov-item"><div class="k">均线</div><div class="v">${r.s.ma.toFixed(0)}<span style="color:var(--text-dim)">/40</span></div></div>
+            <div class="ov-item"><div class="k">动能</div><div class="v">${r.s.mom.toFixed(0)}<span style="color:var(--text-dim)">/25</span></div></div>
+            <div class="ov-item"><div class="k">强弱</div><div class="v">${r.s.str.toFixed(0)}<span style="color:var(--text-dim)">/20</span></div></div>
+            <div class="ov-item"><div class="k">量价</div><div class="v">${r.s.vp.toFixed(0)}<span style="color:var(--text-dim)">/15</span></div></div>
+          </div>
+          <div class="ov-explain">${explainScore(r.s, r.m15, r.m1h, r.vp15)}</div>
+        </div>
+      `;
+    }).join('');
+  } catch(err){
+    grid.innerHTML = `<div class="err">市场概览加载失败：${err.message}。</div>`;
+  }
+}
+
+function setConnStatus(ok, text){
+  const el = document.getElementById('connStatus');
+  if(!el) return;
+  el.className = `conn-status ${ok ? 'ok' : 'err'}`;
+  el.innerHTML = `<i></i>${text}`;
+}
+
 function resetCountdown(){
   state.countdown = 2;
   document.getElementById('countdown').textContent = `下次刷新 ${state.countdown}s`;
@@ -1352,19 +1551,23 @@ function switchTab(inst, name, accent){
   loadData().then(loadLiquidation);
   loadOrderBook();
   loadSentiment();
+  loadOverview();
   startTimer();
+  window.scrollTo({ top: document.querySelector('.tabs').offsetTop - 20, behavior: 'smooth' });
 }
 
 document.getElementById('tabBTC').addEventListener('click', ()=> switchTab('BTC-USDT-SWAP','BTC','btc'));
 document.getElementById('tabETH').addEventListener('click', ()=> switchTab('ETH-USDT-SWAP','ETH','eth'));
 document.getElementById('tabZEC').addEventListener('click', ()=> switchTab('ZEC-USDT-SWAP','ZEC','zec'));
-document.getElementById('refreshBtn').addEventListener('click', ()=>{ loadData().then(loadLiquidation); loadNews(); loadOrderBook(); resetCountdown(); });
+document.getElementById('refreshBtn').addEventListener('click', ()=>{ loadData().then(loadLiquidation); loadNews(); loadOrderBook(); loadOverview(); resetCountdown(); });
 
 loadData().then(loadLiquidation);
 loadNews();
 loadOrderBook();
 loadSentiment();
+loadOverview();
 startTimer();
+setInterval(loadOverview, 20 * 1000);
 setInterval(loadNews, 10 * 1000);
 setInterval(loadLiquidation, 60 * 60 * 1000);
 setInterval(loadOrderBook, 5 * 1000);
