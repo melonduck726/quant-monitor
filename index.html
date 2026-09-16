@@ -58,6 +58,9 @@
   .conn-status i{ width:7px; height:7px; border-radius:50%; background: var(--text-dim); display:inline-block; }
   .conn-status.ok i{ background: var(--pos); box-shadow: 0 0 6px rgba(52,211,153,0.7); }
   .conn-status.err i{ background: var(--neg); }
+  .conn-status i.sync-ok{ background: var(--pos); }
+  .conn-status i.sync-busy{ background: var(--neutral); }
+  .conn-status i.sync-err{ background: var(--neg); }
 
   .banner{
     background: linear-gradient(90deg, rgba(201,168,76,0.12), rgba(201,168,76,0.02));
@@ -292,7 +295,10 @@
       <h1>趋势镜</h1>
       <div class="sub">看清趋势，再慢慢理解市场</div>
     </div>
-    <div class="conn-status" id="connStatus"><i></i>连接中…</div>
+    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
+      <div class="conn-status" id="connStatus"><i></i>连接中…</div>
+      <div class="conn-status" id="syncStatus"><i></i>云端同步待命</div>
+    </div>
   </div>
 
   <div class="banner">
@@ -332,9 +338,16 @@
     </div>
   </div>
 
-  <div class="liq-card">
-    <div class="label">情绪指标 · OKX 衍生品数据</div>
-    <div id="sentContent"><div class="liq-empty">正在加载情绪指标…</div></div>
+  <div class="two-col">
+    <div class="liq-card">
+      <div class="label">情绪指标 · OKX 衍生品数据</div>
+      <div id="sentContent"><div class="liq-empty">正在加载情绪指标…</div></div>
+    </div>
+
+    <div class="liq-card">
+      <div class="label">巨鲸持仓 · Hyperliquid 链上公开数据</div>
+      <div id="whaleContent"><div class="liq-empty">正在加载巨鲸数据…</div></div>
+    </div>
   </div>
 
   <div class="news-card">
@@ -936,6 +949,7 @@ async function loadData(){
         saveStratStats(name, stratStats);
         tradeLog = [...tradeLog, { result: outcome, reason, closedAt: Date.now() }].slice(-500);
         saveTradeLog(name, tradeLog);
+        syncWithGitHub();
         // Don't redeploy immediately — sit out until sentiment/technicals
         // stabilize, rather than chasing straight back in after a stop-out.
         stratState = { status: 'cooldown', lastOutcome: outcome, lastReason: reason, closedAt: Date.now() };
@@ -1515,6 +1529,210 @@ async function loadOverview(){
   }
 }
 
+// ---- Hyperliquid whale tracking ----
+// Hyperliquid is a fully on-chain perp DEX, so every account's positions are
+// public and its info endpoint needs no key. The catch: the API can look up a
+// *given* address but cannot enumerate "the top whales" — that list has to come
+// from somewhere else, so it lives in an editable local watchlist.
+const HL_API = 'https://api.hyperliquid.xyz/info';
+
+function loadWhaleList(){
+  try{
+    const raw = localStorage.getItem('qm_whales');
+    return raw ? JSON.parse(raw) : [];
+  } catch(e){ return []; }
+}
+function saveWhaleList(list){
+  try{ localStorage.setItem('qm_whales', JSON.stringify(list)); } catch(e){ /* ignore */ }
+}
+function promptWhaleList(){
+  const current = loadWhaleList().map(w => w.address).join('\n');
+  const input = prompt('每行粘贴一个 Hyperliquid 钱包地址（0x 开头）：', current);
+  if(input === null) return;
+  const list = input.split('\n').map(s => s.trim())
+    .filter(s => /^0x[a-fA-F0-9]{40}$/.test(s))
+    .map(a => ({ address: a }));
+  saveWhaleList(list);
+  loadWhales();
+}
+
+async function fetchWhalePositions(address){
+  const res = await fetch(HL_API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'clearinghouseState', user: address })
+  });
+  if(!res.ok) throw new Error('HL request failed');
+  return res.json();
+}
+
+// Aggregate every watched whale's BTC/ETH exposure into one net long/short read.
+async function loadWhales(){
+  const el = document.getElementById('whaleContent');
+  const list = loadWhaleList();
+  if(list.length === 0){
+    el.innerHTML = `<div class="liq-empty">还没有配置巨鲸地址。Hyperliquid 的公开接口可以查任意地址的持仓，但无法直接列出"前40大巨鲸"——这份名单需要你自己提供（可从 Hyperliquid 官网排行榜或 HyperInsight 这类站点抄地址）。点下面按钮粘贴地址即可开始追踪。</div>
+      <button class="reset-stats-btn" onclick="promptWhaleList()">配置巨鲸地址</button>`;
+    return;
+  }
+  el.innerHTML = '<div class="liq-empty">正在读取链上持仓…</div>';
+  try{
+    const settled = await Promise.allSettled(list.map(w => fetchWhalePositions(w.address)));
+    const perCoin = {};
+    let okCount = 0;
+    settled.forEach(r => {
+      if(r.status !== 'fulfilled' || !r.value || !r.value.assetPositions) return;
+      okCount++;
+      r.value.assetPositions.forEach(ap => {
+        const p = ap.position; if(!p) return;
+        const coin = p.coin;
+        const szi = Number(p.szi || 0);          // signed size: + long, − short
+        const entry = Number(p.entryPx || 0);
+        const notional = Math.abs(szi) * entry;
+        if(!perCoin[coin]) perCoin[coin] = { long: 0, short: 0, longN: 0, shortN: 0 };
+        if(szi >= 0){ perCoin[coin].long += notional; perCoin[coin].longN++; }
+        else { perCoin[coin].short += notional; perCoin[coin].shortN++; }
+      });
+    });
+
+    const focus = ['BTC','ETH'].filter(c => perCoin[c]);
+    if(okCount === 0){
+      el.innerHTML = `<div class="liq-empty">${list.length} 个地址都没读到数据（可能是接口跨域受限或地址无持仓）。</div>
+        <button class="reset-stats-btn" onclick="promptWhaleList()">重新配置地址</button>`;
+      return;
+    }
+    if(focus.length === 0){
+      el.innerHTML = `<div class="liq-empty">已读取 ${okCount}/${list.length} 个地址，但这些账户当前没有 BTC/ETH 持仓。</div>
+        <button class="reset-stats-btn" onclick="promptWhaleList()">重新配置地址</button>`;
+      return;
+    }
+
+    el.innerHTML = focus.map(coin => {
+      const v = perCoin[coin];
+      const total = v.long + v.short;
+      const longPct = total > 0 ? v.long/total*100 : 50;
+      return `
+        <div style="margin-bottom:14px;">
+          <div class="liq-empty" style="margin-bottom:6px;">${coin} · ${v.longN} 个多头 / ${v.shortN} 个空头 · 名义总额 $${fmtUsd(total)}</div>
+          <div class="gauge-track">
+            <div class="gauge-up" style="width:${longPct}%"></div>
+            <div class="gauge-down" style="width:${100-longPct}%"></div>
+          </div>
+          <div class="gauge-labels">
+            <span class="u">多头 ${longPct.toFixed(0)}% ($${fmtUsd(v.long)})</span>
+            <span class="d">空头 ${(100-longPct).toFixed(0)}% ($${fmtUsd(v.short)})</span>
+          </div>
+        </div>
+      `;
+    }).join('') + `<div class="strategy-note">已读取 ${okCount}/${list.length} 个地址的链上持仓（Hyperliquid 公开数据）。按名义金额加权，不是账户数量。</div>
+      <button class="reset-stats-btn" onclick="promptWhaleList()">编辑地址列表</button>`;
+    window.__whaleBias = focus.reduce((acc,coin) => {
+      const v = perCoin[coin]; const t = v.long+v.short;
+      acc[coin] = t > 0 ? (v.long-v.short)/t : 0; return acc;
+    }, {});
+  } catch(err){
+    el.innerHTML = `<div class="liq-empty">巨鲸数据加载失败：${err.message}。</div>
+      <button class="reset-stats-btn" onclick="promptWhaleList()">重新配置地址</button>`;
+  }
+}
+
+// ---- GitHub cross-device sync ----
+// Trade log lives in one JSON file in the repo so phone / iPad / desktop all
+// converge on the same history. The log is the source of truth; win/loss
+// counts are always derived from it, so merging is just a union by timestamp.
+const GH_OWNER = 'melonduck726';
+const GH_REPO  = 'quant-monitor';
+const GH_PATH  = 'stats.json';
+const GH_TOKEN = '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';
+const GH_API = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_PATH}`;
+let ghSha = null;
+let ghSyncing = false;
+
+const b64encode = (s) => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+const b64decode = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g,'')), c => c.charCodeAt(0)));
+
+function statsFromLog(log){
+  return {
+    wins: log.filter(t => t.result === 'win').length,
+    losses: log.filter(t => t.result === 'loss').length,
+    breakevens: log.filter(t => t.result === 'breakeven').length,
+  };
+}
+// Union by closedAt — the same trade recorded on two devices collapses to one.
+function mergeLogs(a, b){
+  const seen = new Map();
+  [...(a||[]), ...(b||[])].forEach(t => { if(t && t.closedAt) seen.set(t.closedAt, t); });
+  return [...seen.values()].sort((x,y) => x.closedAt - y.closedAt).slice(-500);
+}
+
+async function ghRead(){
+  const res = await fetch(`${GH_API}?ref=main&t=${Date.now()}`, {
+    headers: { Authorization: `Bearer ${GH_TOKEN}`, Accept: 'application/vnd.github+json' }
+  });
+  if(res.status === 404) return { data: {}, sha: null };
+  if(!res.ok) throw new Error(`read ${res.status}`);
+  const j = await res.json();
+  ghSha = j.sha;
+  try{ return { data: JSON.parse(b64decode(j.content)), sha: j.sha }; }
+  catch(e){ return { data: {}, sha: j.sha }; }
+}
+
+async function ghWrite(payload){
+  const body = {
+    message: `sync stats ${new Date().toISOString()}`,
+    content: b64encode(JSON.stringify(payload, null, 2)),
+    branch: 'main',
+  };
+  if(ghSha) body.sha = ghSha;
+  const res = await fetch(GH_API, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${GH_TOKEN}`, Accept: 'application/vnd.github+json' },
+    body: JSON.stringify(body)
+  });
+  if(!res.ok) throw new Error(`write ${res.status}`);
+  const j = await res.json();
+  ghSha = j.content && j.content.sha;
+  return j;
+}
+
+function setSyncStatus(cls, text){
+  const el = document.getElementById('syncStatus');
+  if(el) el.innerHTML = `<i class="${cls}"></i>${text}`;
+}
+
+// Pull remote, union with whatever this device has, write the merged result
+// back, and leave every device holding the same log.
+async function syncWithGitHub(){
+  if(ghSyncing) return;
+  ghSyncing = true;
+  try{
+    setSyncStatus('sync-busy', '同步中…');
+    const { data: remote } = await ghRead();
+    const merged = {};
+    let changed = false;
+    ['BTC','ETH','ZEC'].forEach(sym => {
+      const localLog  = loadTradeLog(sym);
+      const remoteLog = (remote[sym] && remote[sym].log) || [];
+      const m = mergeLogs(localLog, remoteLog);
+      merged[sym] = { log: m, stats: statsFromLog(m) };
+      if(m.length !== localLog.length){
+        saveTradeLog(sym, m);
+        saveStratStats(sym, statsFromLog(m));
+        changed = true;
+      }
+      if(m.length !== remoteLog.length) changed = true;
+    });
+    merged.updatedAt = new Date().toISOString();
+    await ghWrite(merged);
+    setSyncStatus('sync-ok', `已同步 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`);
+    if(changed) loadData();
+  } catch(err){
+    setSyncStatus('sync-err', `同步失败（${err.message}）`);
+  } finally {
+    ghSyncing = false;
+  }
+}
+
 function setConnStatus(ok, text){
   const el = document.getElementById('connStatus');
   if(!el) return;
@@ -1566,8 +1784,12 @@ loadNews();
 loadOrderBook();
 loadSentiment();
 loadOverview();
+loadWhales();
+syncWithGitHub();
 startTimer();
-setInterval(loadOverview, 20 * 1000);
+setInterval(syncWithGitHub, 60 * 1000);
+setInterval(loadOverview, 2 * 1000);
+setInterval(loadWhales, 2 * 60 * 1000);
 setInterval(loadNews, 10 * 1000);
 setInterval(loadLiquidation, 60 * 60 * 1000);
 setInterval(loadOrderBook, 5 * 1000);
