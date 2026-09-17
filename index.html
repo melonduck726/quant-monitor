@@ -196,9 +196,6 @@
   .winrate-row .v.high{ color: var(--pos); }
   .winrate-row .v.mid{ color: var(--neutral); }
   .winrate-row .v.low{ color: var(--neg); }
-  .hour-cell .r.high{ color: var(--pos); }
-  .hour-cell .r.mid{ color: var(--neutral); }
-  .hour-cell .r.low{ color: var(--neg); }
   .vp-line{
     font-size:14px; line-height:1.5; padding:10px 12px; border-radius:8px;
     background: var(--surface-2); border-left:3px solid var(--border); margin-bottom:8px;
@@ -217,6 +214,12 @@
   .status-badge.active{ color: var(--pos); border-color: rgba(52,211,153,0.35); }
   .status-badge.pending{ color: var(--neutral); border-color: rgba(201,168,76,0.3); }
   .status-badge.cooldown{ color: var(--text-dim); border-color: var(--border); }
+  .q-row{ display:flex; align-items:center; gap:8px; margin-bottom:5px; font-size:11.5px; }
+  .q-k{ width:64px; flex-shrink:0; color: var(--text-dim); }
+  .q-bar{ width:70px; flex-shrink:0; height:6px; background:#1c2440; border-radius:3px; overflow:hidden; }
+  .q-bar i{ display:block; height:100%; background: linear-gradient(90deg,#1fae7a,var(--pos)); }
+  .q-v{ width:42px; flex-shrink:0; font-family:'IBM Plex Mono', monospace; color: var(--text); }
+  .q-n{ color: var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .status-badge span{ color: var(--text-dim); font-family:'Inter',sans-serif; font-size:11.5px; }
   .reset-stats-btn{
     font-family:'Inter',sans-serif; font-size:11.5px; color: var(--text-dim);
@@ -237,11 +240,6 @@
   .liq-stat .v.risk-low{ color: var(--pos); }
   .liq-stat .v.risk-mid{ color: var(--neutral); }
   .liq-stat .v.risk-high{ color: var(--neg); }
-  .hour-grid{ display:grid; grid-template-columns: repeat(6,1fr); gap:6px; margin-bottom:10px; }
-  .hour-cell{ background: var(--surface-2); border-radius:8px; padding:7px 2px; text-align:center; }
-  .hour-cell .h{ font-size:10px; color: var(--text-dim); font-family:'IBM Plex Mono', monospace; }
-  .hour-cell .r{ font-family:'IBM Plex Mono', monospace; font-size:12px; font-weight:600; margin-top:2px; }
-  .hour-cell.insufficient .r{ color: var(--text-dim); }
   .divergence-alert{
     display:flex; align-items:flex-start; gap:8px; padding:10px 12px;
     border-radius:8px; margin-bottom:12px; font-size:13px; line-height:1.5;
@@ -346,16 +344,9 @@
     </div>
   </div>
 
-  <div class="two-col">
-    <div class="liq-card">
-      <div class="label">情绪指标 · OKX 衍生品数据</div>
-      <div id="sentContent"><div class="liq-empty">正在加载情绪指标…</div></div>
-    </div>
-
-    <div class="liq-card">
-      <div class="label">巨鲸持仓 · Hyperliquid 链上公开数据</div>
-      <div id="whaleContent"><div class="liq-empty">正在加载巨鲸数据…</div></div>
-    </div>
+  <div class="liq-card">
+    <div class="label">情绪指标 · OKX 衍生品数据</div>
+    <div id="sentContent"><div class="liq-empty">正在加载情绪指标…</div></div>
   </div>
 
   <div class="news-card">
@@ -374,6 +365,11 @@
 <script>
 const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 2 };
 const OKX_BASE = 'https://www.okx.com';
+
+// Market microstructure captured by the slower loaders (order book, liquidation
+// map, funding) and consumed by the strategy. Each field is null until its
+// loader has run at least once; every consumer must degrade gracefully.
+const marketCtx = { book: null, liq: null, funding: null, symbol: null };
 const COIN_ICONS = {
   BTC: 'https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/32/color/btc.png',
   ETH: 'https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/32/color/eth.png',
@@ -475,12 +471,29 @@ function computeMetrics(candles){
   };
 }
 
+// Within one timeframe, the three indicators no longer have to agree
+// unanimously — each contributes its own share, so "2 of 3 agreeing" reads as a
+// weaker signal rather than collapsing to 震荡 the way a strict AND did.
+// Trend structure (EMA) carries half the weight; momentum (RSI) and trend
+// strength (MACD) split the rest.
+const IND_WEIGHTS = { ema: 0.5, rsi: 0.25, macd: 0.25 };
+function periodDirScore(m){
+  return (m.ema20 > m.ema60 ? 1 : -1) * IND_WEIGHTS.ema
+       + (m.rsi   >= 50     ? 1 : -1) * IND_WEIGHTS.rsi
+       + (m.macd  > 0       ? 1 : -1) * IND_WEIGHTS.macd;   // -1 .. +1
+}
 function direction(m){
-  if(m.ema20 > m.ema60 && m.rsi >= 50 && m.macd > 0) return 'long';
-  if(m.ema20 < m.ema60 && m.rsi < 50 && m.macd < 0) return 'short';
+  const s = periodDirScore(m);
+  if(s >= 0.5) return 'long';
+  if(s <= -0.5) return 'short';
   return 'flat';
 }
 function dirLabel(d){ return d==='long' ? '偏多' : d==='short' ? '偏空' : '震荡'; }
+
+// Timeframe weights for the composite direction. Tuned for intraday trading:
+// 1m is mostly noise, 15m-1H carry the working signal, 4H/1D set context.
+const PERIOD_WEIGHTS = { '1m':0.5, '5m':1.0, '15m':2.0, '30m':2.0, '1H':2.0, '4H':1.5, '1D':1.0 };
+const TOTAL_WEIGHT = Object.values(PERIOD_WEIGHTS).reduce((a,b)=>a+b,0); // 10
 
 async function fetchCandles(instId, bar, limit){
   const url = `${OKX_BASE}/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=${limit}`;
@@ -645,10 +658,10 @@ function findSwingLevels(candles, pivotSpan=2){
 // as a reference comparison line in the strategy note, not as a hard input.
 const HIST_AVG_STOP_PCT = 1.7;
 
-function strategyConfidence(score, periodCount){
-  const absScore = Math.abs(score);
-  if(absScore >= Math.ceil(periodCount*0.66)) return '强';
-  if(absScore >= Math.ceil(periodCount/2)) return '中';
+function strategyConfidence(score, totalWeight){
+  const ratio = Math.abs(score) / (totalWeight || 1);
+  if(ratio >= 0.60) return '强';
+  if(ratio >= 0.35) return '中';
   return '弱';
 }
 
@@ -689,8 +702,84 @@ function adjustConfidenceForVolume(base, dir, vp15, vp1h){
   return { level: order[idx], net };
 }
 
-function buildStrategy(score, periodCount, price, k5m, k15, name, dir, reversed, atr15m, vp15, vp1h){
-  const baseConfidence = strategyConfidence(score, periodCount);
+// Push a stop clear of liquidation clusters. Stops resting inside a zone where
+// leverage was recently wiped out get hunted disproportionately, so if the
+// structural stop lands in (or just inside) a cluster, move it past the far
+// edge of that cluster plus a small buffer.
+function avoidLiquidationCluster(stopPx, dir, atr, ctx){
+  if(!ctx || !ctx.clusters || ctx.clusters.length === 0) return { stop: stopPx, moved: false };
+  const band = atr * 0.35;                 // "close enough to be in the zone"
+  const hits = ctx.clusters.filter(b => Math.abs(b.price - stopPx) <= band);
+  if(hits.length === 0) return { stop: stopPx, moved: false };
+  // only meaningful clusters — ignore thin ones
+  const median = [...ctx.clusters].map(b=>b.total).sort((a,b)=>a-b)[Math.floor(ctx.clusters.length/2)] || 0;
+  const heavy = hits.filter(b => b.total >= median);
+  if(heavy.length === 0) return { stop: stopPx, moved: false };
+  const buffer = atr * 0.25;
+  const moved = dir === 'long'
+    ? Math.min(...heavy.map(b => b.price)) - buffer   // long stop sits below → go further below
+    : Math.max(...heavy.map(b => b.price)) + buffer;  // short stop sits above → go further above
+  const better = dir === 'long' ? Math.min(stopPx, moved) : Math.max(stopPx, moved);
+  return { stop: better, moved: better !== stopPx };
+}
+
+// Composite entry-quality read, 0-100. Deliberately NOT a hard "signal must be
+// 强" gate — a moderate trend signal backed by agreeing volume and order flow
+// can be a better trade than a strong signal fighting the book.
+function entryQuality({ score, totalWeight, dir, vp15, vp1h, riskScore, book, funding, atrPct }){
+  const parts = [];
+  let total = 0;
+
+  // trend consensus, 0-35
+  const ratio = Math.abs(score)/(totalWeight||1);
+  const trendPts = Math.max(0, Math.min(35, ratio * 55));
+  total += trendPts;
+  parts.push({ k:'多周期共振', v:trendPts, max:35, note:`加权 ${score.toFixed(1)}/${totalWeight}` });
+
+  // volume-price agreement, 0-25
+  const agree = (vp) => !vp ? 0.5 : (dir==='long' && vp.cls==='pos')||(dir==='short' && vp.cls==='neg') ? 1
+                       : (dir==='long' && vp.cls==='neg')||(dir==='short' && vp.cls==='pos') ? 0 : 0.5;
+  const vpPts = (agree(vp15)*0.6 + agree(vp1h)*0.4) * 25;
+  total += vpPts;
+  parts.push({ k:'量价配合', v:vpPts, max:25, note: vpPts>=18?'支持':vpPts<=8?'相悖':'中性' });
+
+  // order-flow agreement, 0-20 (neutral credit when book data is unavailable)
+  let obPts = 10, obNote = '盘口数据暂无', veto = null;
+  if(book && typeof book.imbalance === 'number'){
+    const aligned = dir === 'long' ? book.imbalance : -book.imbalance;  // -1..+1
+    obPts = Math.max(0, Math.min(20, (aligned + 1) / 2 * 20));
+    obNote = `失衡 ${(book.imbalance*100).toFixed(0)}%（${book.imbalance>=0?'买盘占优':'卖盘占优'}）`;
+    // Hard veto: entering directly into a wall of opposing resting size is a
+    // bad trade no matter how clean the trend signal looks.
+    if(aligned <= -0.6){ veto = '盘口强烈反向（挂单墙压制），无论信号多强都不进场'; obNote += ' ⚠'; }
+  }
+  total += obPts;
+  parts.push({ k:'盘口失衡', v:obPts, max:20, note:obNote });
+
+  // inverse risk score, 0-12
+  const riskPts = Math.max(0, Math.min(12, (100 - riskScore)/100 * 12));
+  total += riskPts;
+  parts.push({ k:'风险状态', v:riskPts, max:12, note:`风险概率 ${riskScore}%` });
+
+  // funding crowding, 0-8 — penalise entering on the crowded side
+  let fundPts = 4, fundNote = '资金费率暂无';
+  if(funding && typeof funding.ratePct === 'number'){
+    const r = funding.ratePct;                       // percent, e.g. 0.01
+    const crowdedAgainst = dir === 'long' ? r : -r;  // >0 means our side is crowded
+    fundPts = crowdedAgainst > 0.05 ? 0 : crowdedAgainst > 0.02 ? 3 : crowdedAgainst < -0.02 ? 8 : 6;
+    fundNote = `${r>=0?'+':''}${r.toFixed(4)}%${crowdedAgainst>0.05?'（同向拥挤）':''}`;
+  }
+  total += fundPts;
+  parts.push({ k:'资金费率', v:fundPts, max:8, note:fundNote });
+
+  return { total: veto ? Math.min(total, QUALITY_MIN - 1) : total, parts, veto };
+}
+// Neutral-everything scores about 35, perfect alignment 100. 68 keeps the bar
+// meaningfully above "merely not bad" without demanding a flawless setup.
+const QUALITY_MIN = 68;
+
+function buildStrategy(score, totalWeight, price, k5m, k15, name, dir, reversed, atr15m, vp15, vp1h, liqCtx){
+  const baseConfidence = strategyConfidence(score, TOTAL_WEIGHT);
   const { level: confidence, net: volNet } = adjustConfidenceForVolume(baseConfidence, dir, vp15, vp1h);
   const volNote = volNet > 0 ? '量价关系支持该方向，信号强度已上调。'
     : volNet < 0 ? '量价关系与该方向相悖（价量背离或反向放量），信号强度已下调，建议更谨慎。'
@@ -710,7 +799,7 @@ function buildStrategy(score, periodCount, price, k5m, k15, name, dir, reversed,
   const minRR = 1.5; // reject a candidate target closer than 1.5x the stop distance
 
   const weakNote = confidence === '弱'
-    ? `当前 ${periodCount} 个周期还没有形成明确共振，方向仅按短周期动能给出参考，建议轻仓试探或观望为主。`
+    ? `多周期加权共振仅 ${score.toFixed(1)}/${totalWeight}，还没形成明确方向，仅按短周期动能给出参考，建议轻仓试探或观望为主。`
     : '';
 
   function styleCompareNote(distancePct){
@@ -748,6 +837,11 @@ function buildStrategy(score, periodCount, price, k5m, k15, name, dir, reversed,
     const entry = minorLows.length ? Math.max(...minorLows) : price;
     const majorLows = major.lows.filter(l => l < entry);
     let stop = majorLows.length ? Math.max(...majorLows) : Math.min(...recent80.map(c=>c.low));
+    // Structural levels are exactly where everyone else parks their stop, so
+    // sit half an ATR beyond it rather than right on it.
+    stop -= atr15m * 0.5;
+    const liqAdj = avoidLiquidationCluster(stop, 'long', atr15m, liqCtx);
+    stop = liqAdj.stop;
     let distance = entry - stop;
     let widened = false;
     if(distance < minDistance){ stop = entry - minDistance; distance = minDistance; widened = true; }
@@ -759,7 +853,7 @@ function buildStrategy(score, periodCount, price, k5m, k15, name, dir, reversed,
       confidence, rr: rr.toFixed(1),
       rawEntry: entry, rawStop: stop, rawTarget: target,
       entry: fmt(entry,d), stop: fmt(stop,d), target: fmt(target,d),
-      note: `建议挂限价单在 ${fmt(entry,d)} 附近的回踩支撑位，等回踩确认再进场。止损参考更下方的结构性支撑${widened ? '（附近结构位太近，已按15m ATR放宽到最小有效距离）' : ''}。止盈参考 ${fmt(target,d)}（${source}），对应盈亏比约 1:${rr.toFixed(1)}。${styleCompareNote(distancePct)} ${volNote} ${reversedNote} ${weakNote}`
+      note: `建议挂限价单在 ${fmt(entry,d)} 附近的回踩支撑位，等回踩确认再进场。止损设在结构性支撑再往下 0.5×ATR 处（避开扎堆止损位）${liqAdj.moved ? '，并已避开附近的强平密集区' : ''}${widened ? '，因结构位过近已按15m ATR放宽到最小有效距离' : ''}。止盈参考 ${fmt(target,d)}（${source}），对应盈亏比约 1:${rr.toFixed(1)}。${styleCompareNote(distancePct)} ${volNote} ${reversedNote} ${weakNote}`
     };
   }
 
@@ -767,6 +861,9 @@ function buildStrategy(score, periodCount, price, k5m, k15, name, dir, reversed,
   const entry = minorHighs.length ? Math.min(...minorHighs) : price;
   const majorHighs = major.highs.filter(h => h > entry);
   let stop = majorHighs.length ? Math.min(...majorHighs) : Math.max(...recent80.map(c=>c.high));
+  stop += atr15m * 0.5;
+  const liqAdj = avoidLiquidationCluster(stop, 'short', atr15m, liqCtx);
+  stop = liqAdj.stop;
   let distance = stop - entry;
   let widened = false;
   if(distance < minDistance){ stop = entry + minDistance; distance = minDistance; widened = true; }
@@ -778,7 +875,7 @@ function buildStrategy(score, periodCount, price, k5m, k15, name, dir, reversed,
     confidence, rr: rr.toFixed(1),
     rawEntry: entry, rawStop: stop, rawTarget: target,
     entry: fmt(entry,d), stop: fmt(stop,d), target: fmt(target,d),
-    note: `建议挂限价单在 ${fmt(entry,d)} 附近的反抽压力位，等反抽确认再进场。止损参考更上方的结构性压力${widened ? '（附近结构位太近，已按15m ATR放宽到最小有效距离）' : ''}。止盈参考 ${fmt(target,d)}（${source}），对应盈亏比约 1:${rr.toFixed(1)}。${styleCompareNote(distancePct)} ${volNote} ${reversedNote} ${weakNote}`
+    note: `建议挂限价单在 ${fmt(entry,d)} 附近的反抽压力位，等反抽确认再进场。止损设在结构性压力再往上 0.5×ATR 处（避开扎堆止损位）${liqAdj.moved ? '，并已避开附近的强平密集区' : ''}${widened ? '，因结构位过近已按15m ATR放宽到最小有效距离' : ''}。止盈参考 ${fmt(target,d)}（${source}），对应盈亏比约 1:${rr.toFixed(1)}。${styleCompareNote(distancePct)} ${volNote} ${reversedNote} ${weakNote}`
   };
 }
 
@@ -786,14 +883,15 @@ async function loadData(){
   const content = document.getElementById('content');
   const name = state.name;
   try{
-    const [ticker, k1m, k5m, k15, k30, k1h, k4h] = await Promise.all([
+    const [ticker, k1m, k5m, k15, k30, k1h, k4h, k1d] = await Promise.all([
       fetchTicker(state.inst),
       fetchCandles(state.inst, '1m', 200),
       fetchCandles(state.inst, '5m', 300),
       fetchCandles(state.inst, '15m', 260),
       fetchCandles(state.inst, '30m', 200),
       fetchCandles(state.inst, '1H', 300),
-      fetchCandles(state.inst, '4H', 100),
+      fetchCandles(state.inst, '4H', 200),
+      fetchCandles(state.inst, '1D', 200),
     ]);
 
     const periods = [
@@ -803,28 +901,30 @@ async function loadData(){
       { label: '30m', candles: k30 },
       { label: '1H',  candles: k1h },
       { label: '4H',  candles: k4h },
+      { label: '1D',  candles: k1d },
     ].map(p => {
       const m = computeMetrics(p.candles);
-      const d = direction(m);
-      return { ...p, m, d };
+      return { ...p, m, d: direction(m), ds: periodDirScore(m), w: PERIOD_WEIGHTS[p.label] };
     });
     const periodCount = periods.length;
 
-    const score = periods.reduce((s,p)=> s + (p.d==='long'?1:p.d==='short'?-1:0), 0);
-    const threshold = Math.ceil(periodCount/2);
+    // Weighted composite: each timeframe's internal score times its own weight.
+    const score = periods.reduce((s,p) => s + p.ds * p.w, 0);   // -10 .. +10
+    const threshold = TOTAL_WEIGHT * 0.35;
     let overall = 'flat', overallLabel = '观望';
     if(score >= threshold){ overall='long'; overallLabel='做多'; }
     else if(score <= -threshold){ overall='short'; overallLabel='做空'; }
 
-    const rsi15 = periods[2].m.rsi;
-    let up15 = 50 + (rsi15-50)*0.35 + score*3;
-    up15 = Math.max(8, Math.min(92, up15));
-    const down15 = 100 - up15;
-
-    const rsi1h = periods[4].m.rsi;
-    let up1h = 50 + (rsi1h-50)*0.35 + score*3;
-    up1h = Math.max(8, Math.min(92, up1h));
-    const down1h = 100 - up1h;
+    const gauge = (rsi) => {
+      const up = Math.max(8, Math.min(92, 50 + (rsi-50)*0.35 + score*3));
+      return { up, down: 100-up };
+    };
+    const g15 = gauge(periods[2].m.rsi);
+    const g1h = gauge(periods[4].m.rsi);
+    const g4h = gauge(periods[5].m.rsi);
+    const up15 = g15.up, down15 = g15.down;
+    const up1h = g1h.up, down1h = g1h.down;
+    const up4h = g4h.up, down4h = g4h.down;
 
     const last = parseFloat(ticker.last);
     const open24h = parseFloat(ticker.open24h);
@@ -900,7 +1000,7 @@ async function loadData(){
     // "企稳" gate used by the post-trade cooldown below: technical picture is a
     // real multi-period consensus (not just a weak tie-break), and risk score
     // isn't elevated. Both need to hold before the strategy redeploys.
-    const isStabilized = strategyConfidence(score, periodCount) !== '弱' && riskScore <= 50;
+    const isStabilized = strategyConfidence(score, TOTAL_WEIGHT) !== '弱' && riskScore <= 50;
 
     // Locked-trade state machine: don't recompute entry/stop/target every
     // cycle — hold the last suggestion until price actually resolves it
@@ -914,19 +1014,39 @@ async function loadData(){
     // produce a different entry/stop/target on each one; a closed candle is
     // identical everywhere, so all devices derive the same suggestion.
     const anchorPx = k5m.length >= 2 ? k5m[k5m.length-2].close : last;
+    // Only use microstructure context that belongs to the coin on screen —
+    // these loaders run on their own cadence and may still hold another symbol.
+    const bookCtx = (marketCtx.book && marketCtx.book.symbol === name) ? marketCtx.book : null;
+    const liqCtx  = (marketCtx.liq  && marketCtx.liq.symbol  === name) ? marketCtx.liq  : null;
+    const fundCtx = (marketCtx.funding && marketCtx.funding.symbol === name) ? marketCtx.funding : null;
+
+    const qualityDir = determineEffectiveDirection(score, periods[1].m.rsi, riskScore, anchorPx, cautionUpper, cautionLower).dir;
+    const quality = entryQuality({
+      score, totalWeight: TOTAL_WEIGHT, dir: qualityDir,
+      vp15, vp1h, riskScore, book: bookCtx, funding: fundCtx, atrPct,
+    });
+
     function freshSuggestion(){
       const { dir, reversed } = determineEffectiveDirection(score, periods[1].m.rsi, riskScore, anchorPx, cautionUpper, cautionLower);
-      const built = buildStrategy(score, periodCount, anchorPx, k5m, k15, name, dir, reversed, periods[2].m.atr, vp15, vp1h);
+      const built = buildStrategy(score, TOTAL_WEIGHT, anchorPx, k5m, k15, name, dir, reversed, periods[2].m.atr, vp15, vp1h, liqCtx);
       const anchorBar = k5m.length >= 2 ? k5m[k5m.length-2].time : Date.now();
-      const next = { ...built, status: 'pending', createdAt: Date.now(), anchorBar };
+      const next = { ...built, status: 'pending', createdAt: Date.now(), anchorBar, quality: quality.total };
       saveStratState(name, next);
       return next;
     }
-    // Gate: don't issue a new suggestion at all while the volatility regime is
-    // extreme — park in 'volwait' instead, re-checked every cycle.
+    // Gates before a new suggestion is issued: volatility regime must be sane,
+    // and the composite setup quality must clear the bar. Quality is a blend of
+    // trend consensus, volume-price agreement, order-flow imbalance, risk state
+    // and funding crowding — so a merely "中" signal with everything else lined
+    // up still qualifies, while a "强" signal fighting the book does not.
     function trySuggest(){
       if(volRegime !== 'normal'){
         const next = { status: 'volwait', volRegime, atrPct, closedAt: Date.now() };
+        saveStratState(name, next);
+        return next;
+      }
+      if(quality.total < QUALITY_MIN){
+        const next = { status: 'lowquality', quality: quality.total, closedAt: Date.now() };
         saveStratState(name, next);
         return next;
       }
@@ -967,13 +1087,20 @@ async function loadData(){
 
       // Stage the stop up as the trade moves into profit: breakeven at 1R,
       // then trail to lock in 1R of gains once it's reached 2R. Never loosens.
+      // "Breakeven" means the true break-even *price* — the entry shifted far
+      // enough to cover round-trip fees — not the raw entry, which would still
+      // close at a small net loss once maker+taker fees are paid.
+      const feeOffset = stratState.rawEntry * (FEE_MAKER + FEE_TAKER);
+      const breakevenPx = stratState.dir === 'long'
+        ? stratState.rawEntry + feeOffset
+        : stratState.rawEntry - feeOffset;
       let effectiveStop = stratState.effectiveStop ?? stratState.rawStop;
       let stopStage = stratState.stopStage ?? 'initial';
       if(profitR >= 2 && stopStage !== 'trailing'){
         effectiveStop = stratState.dir === 'long' ? stratState.rawEntry + riskDistance : stratState.rawEntry - riskDistance;
         stopStage = 'trailing';
       } else if(profitR >= 1 && stopStage === 'initial'){
-        effectiveStop = stratState.rawEntry;
+        effectiveStop = breakevenPx;
         stopStage = 'breakeven';
       }
 
@@ -1032,13 +1159,23 @@ async function loadData(){
       }
     } else if(stratState.status === 'volwait'){
       if(volRegime === 'normal'){
-        stratState = freshSuggestion();
+        stratState = trySuggest();
       } else if(stratState.volRegime !== volRegime){
         stratState = { ...stratState, volRegime, atrPct, closedAt: Date.now() };
         saveStratState(name, stratState);
       }
+    } else if(stratState.status === 'lowquality'){
+      if(volRegime !== 'normal'){
+        stratState = { status: 'volwait', volRegime, atrPct, closedAt: Date.now() };
+        saveStratState(name, stratState);
+      } else if(quality.total >= QUALITY_MIN){
+        stratState = freshSuggestion();
+      } else if(Math.abs((stratState.quality||0) - quality.total) >= 1){
+        stratState = { ...stratState, quality: quality.total };
+        saveStratState(name, stratState);
+      }
     }
-    const strategy = (stratState.status === 'cooldown' || stratState.status === 'volwait') ? null : stratState;
+    const strategy = ['cooldown','volwait','lowquality'].includes(stratState.status) ? null : stratState;
     const cooldownLeftMs = stratState.status === 'cooldown'
       ? Math.max(0, COOLDOWN_MS - (Date.now() - (stratState.closedAt || 0))) : 0;
     const stratWins = stratStats.wins || 0;
@@ -1047,7 +1184,8 @@ async function loadData(){
     const stratTotal = stratWins + stratLosses + stratBreakevens;
     const stratWinRate = (stratWins + stratLosses) > 0 ? (stratWins / (stratWins + stratLosses) * 100) : null;
     const REASON_LABEL = { target: '止盈到位', exhaustion: '动能衰竭提前止盈', trailed: '移动止损锁盈', breakeven: '保本出场', stop: '止损', cancelled: '手动取消' };
-    const statusLabel = stratState.status === 'volwait' ? `波动率异常，暂停出信号（ATR处于近期${atrPct.toFixed(0)}分位）`
+    const statusLabel = stratState.status === 'lowquality' ? `入场质量不足（${quality.total.toFixed(0)}/100，需≥${QUALITY_MIN}），等更好的机会`
+      : stratState.status === 'volwait' ? `波动率异常，暂停出信号（ATR处于近期${atrPct.toFixed(0)}分位）`
       : !strategy ? '观望中，等待情绪与技术面企稳后再布局'
       : strategy.status === 'active' ? `持仓中${strategy.stopStage==='trailing' ? '（止损已上移锁盈）' : strategy.stopStage==='breakeven' ? '（止损已移至保本位）' : ''}，等待触及止损/止盈`
       : '待入场，等待价格触达限价位';
@@ -1068,22 +1206,6 @@ async function loadData(){
     const statsDay = windowStats(tradeLog, 24*60*60*1000);
     const statsWeek = windowStats(tradeLog, 7*24*60*60*1000);
     const statsMonth = windowStats(tradeLog, 30*24*60*60*1000);
-    // Win rate by hour-of-day (device local time), 24 buckets — surfaces
-    // whether this rule set actually has an edge in specific trading windows.
-    function hourlyStats(log){
-      const buckets = Array.from({length:24}, () => ({ wins:0, losses:0, breakevens:0 }));
-      log.forEach(t => {
-        const h = new Date(t.closedAt).getHours();
-        if(t.result === 'win') buckets[h].wins++;
-        else if(t.result === 'loss') buckets[h].losses++;
-        else if(t.result === 'breakeven') buckets[h].breakevens++;
-      });
-      return buckets.map((b, hour) => {
-        const total = b.wins + b.losses;
-        return { hour, ...b, total, rate: total > 0 ? (b.wins/total*100) : null };
-      });
-    }
-    const hourly = hourlyStats(tradeLog);
     const recentTrades = [...tradeLog].sort((a,b) => b.closedAt - a.closedAt).slice(0, 10);
     const acctCfg = loadAccountCfg(name);
     const equity = computeEquity(tradeLog, acctCfg);
@@ -1107,7 +1229,7 @@ async function loadData(){
           <div class="label">多周期综合</div>
           <div class="value ${overall}">${overallLabel}</div>
         </div>
-        <div class="score">${score >= 0 ? '+'+score : score} / ${periodCount}</div>
+        <div class="score">${score >= 0 ? '+' : ''}${score.toFixed(1)} / ${TOTAL_WEIGHT}</div>
       </div>
 
       <div class="gauge-card">
@@ -1129,11 +1251,28 @@ async function loadData(){
           <span class="u">上涨倾向 ${up1h.toFixed(0)}%</span>
           <span class="d">下跌倾向 ${down1h.toFixed(0)}%</span>
         </div>
+        <div class="label" style="margin-top:16px;">下一个 4 小时倾向</div>
+        <div class="gauge-track">
+          <div class="gauge-up" style="width:${up4h}%"></div>
+          <div class="gauge-down" style="width:${down4h}%"></div>
+        </div>
+        <div class="gauge-labels">
+          <span class="u">上涨倾向 ${up4h.toFixed(0)}%</span>
+          <span class="d">下跌倾向 ${down4h.toFixed(0)}%</span>
+        </div>
       </div>
 
       <div class="strategy-card">
         <div class="label">实时策略</div>
-        ${stratState.status === 'volwait' ? `
+        ${stratState.status === 'lowquality' ? `
+        <div class="strategy-head">
+          <div class="strategy-dir flat">入场质量不足</div>
+          <div class="confidence">质量分 ${quality.total.toFixed(0)} / 100</div>
+        </div>
+        <div class="status-badge cooldown">○ 观望中<span>${statusLabel}</span></div>
+        ${quality.parts.map(p => `<div class="q-row"><span class="q-k">${p.k}</span><div class="q-bar"><i style="width:${(p.v/p.max*100).toFixed(0)}%"></i></div><span class="q-v">${p.v.toFixed(0)}/${p.max}</span><span class="q-n">${p.note}</span></div>`).join('')}
+        <div class="strategy-note">${quality.veto ? `<b style="color:var(--neg)">否决：${quality.veto}</b><br>` : ''}当前各项条件综合下来还不够好（需 ≥ ${QUALITY_MIN} 分）。不是单看信号强弱——一个"中"等强度但量价、盘口、资金费率都配合的机会，会比"强"信号却逆着盘口的机会得分更高。条件改善会自动出单。</div>
+        ` : stratState.status === 'volwait' ? `
         <div class="strategy-head">
           <div class="strategy-dir flat">波动率异常，暂停信号</div>
         </div>
@@ -1145,7 +1284,7 @@ async function loadData(){
         </div>
         <div class="status-badge cooldown">○ 观望中<span>${statusLabel}</span></div>
         <div class="strategy-note">${stratState.lastReason === 'cancelled' ? '已手动取消策略（未计入胜负统计）' : `上一单${REASON_LABEL[stratState.lastReason] || (stratState.lastOutcome==='win'?'止盈':stratState.lastOutcome==='breakeven'?'保本':'止损')}平仓`}后进入观望，避免刚平完就立刻反手追进去。<br>
-          重新布局需同时满足两个条件：<b>①</b> 冷静期满 10 分钟 —— ${cooldownLeftMs > 0 ? `还剩 <b style="color:var(--neutral)">${Math.ceil(cooldownLeftMs/60000)} 分钟</b>` : '<b style="color:var(--pos)">已满足</b>'}；<b>②</b> 信号强度回到"中"或以上且风险概率低于50 —— 当前信号强度 <b>${strategyConfidence(score, periodCount)}</b>、风险概率 <b>${riskScore}%</b>，${(strategyConfidence(score, periodCount)!=='弱' && riskScore<=50) ? '<b style="color:var(--pos)">已满足</b>' : '<b style="color:var(--neutral)">尚未满足</b>'}。</div>
+          重新布局需同时满足两个条件：<b>①</b> 冷静期满 10 分钟 —— ${cooldownLeftMs > 0 ? `还剩 <b style="color:var(--neutral)">${Math.ceil(cooldownLeftMs/60000)} 分钟</b>` : '<b style="color:var(--pos)">已满足</b>'}；<b>②</b> 信号强度回到"中"或以上且风险概率低于50 —— 当前信号强度 <b>${strategyConfidence(score, TOTAL_WEIGHT)}</b>、风险概率 <b>${riskScore}%</b>，${(strategyConfidence(score, TOTAL_WEIGHT)!=='弱' && riskScore<=50) ? '<b style="color:var(--pos)">已满足</b>' : '<b style="color:var(--neutral)">尚未满足</b>'}。</div>
         ` : `
         <div class="strategy-head">
           <div class="strategy-dir ${strategy.dir}">${strategy.dirLabel}</div>
@@ -1157,6 +1296,7 @@ async function loadData(){
           <div class="strategy-cell"><div class="k">止损参考${strategy.status==='active' && strategy.stopStage!=='initial' ? '（已上移）' : ''}</div><div class="v stop">${strategy.status==='active' && strategy.effectiveStop!==undefined ? fmt(strategy.effectiveStop, d) : strategy.stop}</div></div>
           <div class="strategy-cell"><div class="k">止盈参考（1:${strategy.rr}）</div><div class="v target">${strategy.target}</div></div>
         </div>
+        ${quality.parts.map(p => `<div class="q-row"><span class="q-k">${p.k}</span><div class="q-bar"><i style="width:${(p.v/p.max*100).toFixed(0)}%"></i></div><span class="q-v">${p.v.toFixed(0)}/${p.max}</span><span class="q-n">${p.note}</span></div>`).join('')}
         <div class="winrate-row">
           <div class="k">预测胜率（15m 规则回测）<span class="sample">${backtest ? `近 ${backtest.sample} 次同类信号，95%置信区间 ${backtest.ciLow.toFixed(0)}–${backtest.ciHigh.toFixed(0)}%` : '样本不足'}</span></div>
           <div class="v ${winRateCls}">${winRate === null ? '—' : winRate.toFixed(0)+'%'}</div>
@@ -1183,33 +1323,6 @@ async function loadData(){
           <div class="liq-stat"><div class="k">近30天</div><div class="v ${statsMonth.rate===null?'mid':statsMonth.rate>=55?'high':statsMonth.rate>=45?'mid':'low'}">${statsMonth.rate===null?'—':statsMonth.rate.toFixed(0)+'%'}</div></div>
         </div>
         <div class="strategy-note" style="padding:0 6px;">近24小时 ${statsDay.wins}胜${statsDay.losses}负${statsDay.breakevens?`${statsDay.breakevens}保本`:''}，近7天 ${statsWeek.wins}胜${statsWeek.losses}负${statsWeek.breakevens?`${statsWeek.breakevens}保本`:''}，近30天 ${statsMonth.wins}胜${statsMonth.losses}负${statsMonth.breakevens?`${statsMonth.breakevens}保本`:''}。胜率不计保本单。样本积累需要时间，刚开始用的时候几个窗口都可能是"—"，正常。</div>
-      </div>
-
-      <div class="table-card">
-        <div class="label">按小时胜率分布 · ${name}（本机时区，0-23时）</div>
-        <div class="hour-grid">
-          ${hourly.map(h => {
-            const insufficient = h.total < 3;
-            const cls = insufficient ? 'mid' : h.rate>=55 ? 'high' : h.rate>=45 ? 'mid' : 'low';
-            return `
-              <div class="hour-cell ${insufficient?'insufficient':''}">
-                <div class="h">${String(h.hour).padStart(2,'0')}时</div>
-                <div class="r ${cls}">${h.rate===null?'—':h.rate.toFixed(0)+'%'}</div>
-              </div>
-            `;
-          }).join('')}
-        </div>
-        ${(() => {
-          const enough = hourly.filter(h => h.total >= 3 && h.rate !== null);
-          if(enough.length === 0) return '<div class="strategy-note" style="padding:0 6px;">每个小时样本不足3单时不参与排名，暂时数据不够，先攒单。</div>';
-          const best = [...enough].sort((a,b)=>b.rate-a.rate).slice(0,3);
-          const worst = [...enough].sort((a,b)=>a.rate-b.rate).slice(0,3);
-          return `<div class="strategy-note" style="padding:0 6px;">
-            表现较好：${best.map(h=>`${String(h.hour).padStart(2,'0')}时(${h.rate.toFixed(0)}%，${h.total}单)`).join('、')}。
-            表现较弱：${worst.map(h=>`${String(h.hour).padStart(2,'0')}时(${h.rate.toFixed(0)}%，${h.total}单)`).join('、')}。
-            少于3单的时段不参与排名，灰色显示。这套规则是不是在特定时段更有优势，攒够样本后这里会看得出来。
-          </div>`;
-        })()}
       </div>
 
       <div class="table-card">
@@ -1380,6 +1493,8 @@ async function loadLiquidation(){
         .sort((a,b) => b.total - a.total)
         .slice(0, 16)
         .sort((a,b) => b.price - a.price);
+      // publish clusters for stop-placement avoidance
+      marketCtx.liq = { symbol: state.name, at: Date.now(), clusters: bucketList, currentPrice };
       if(bucketList.length > 0){
         const maxTotal = Math.max(...bucketList.map(b => b.total), 1);
         const dd = decimals(state.name);
@@ -1480,6 +1595,16 @@ async function loadOrderBook(){
 
     const maxSize = Math.max(...[...askBuckets,...bidBuckets].map(x => x[1]), 1);
 
+    // Depth imbalance within ±0.5% of mid: +1 = bids dominate (buy pressure),
+    // -1 = asks dominate. Published for the strategy's entry-quality check.
+    const NEAR = 0.005;
+    const bidVol = book.bids.reduce((s,[p,sz]) =>
+      (mid - Number(p))/mid <= NEAR ? s + Number(sz) : s, 0);
+    const askVol = book.asks.reduce((s,[p,sz]) =>
+      (Number(p) - mid)/mid <= NEAR ? s + Number(sz) : s, 0);
+    const imbalance = (bidVol + askVol) > 0 ? (bidVol - askVol)/(bidVol + askVol) : 0;
+    marketCtx.book = { symbol: state.name, at: Date.now(), mid, bidVol, askVol, imbalance };
+
     let aggHtml = '';
     try{
       const agg = await fetchAggBook(state.name);
@@ -1518,6 +1643,7 @@ async function loadSentiment(){
   if(results[0].status === 'fulfilled' && results[0].value.code === '0'){
     const rate = Number(results[0].value.data[0].fundingRate) * 100;
     fundingHtml = `${rate>=0?'+':''}${rate.toFixed(4)}%`;
+    marketCtx.funding = { symbol: state.name, at: Date.now(), ratePct: rate };
   }
   if(results[1].status === 'fulfilled' && results[1].value.code === '0'){
     const oi = Number(results[1].value.data[0].oiCcy);
@@ -1718,113 +1844,6 @@ async function loadOverview(){
   }
 }
 
-// ---- Hyperliquid whale tracking ----
-// Hyperliquid is a fully on-chain perp DEX, so every account's positions are
-// public and its info endpoint needs no key. The catch: the API can look up a
-// *given* address but cannot enumerate "the top whales" — that list has to come
-// from somewhere else, so it lives in an editable local watchlist.
-const HL_API = 'https://api.hyperliquid.xyz/info';
-
-function loadWhaleList(){
-  try{
-    const raw = localStorage.getItem('qm_whales');
-    return raw ? JSON.parse(raw) : [];
-  } catch(e){ return []; }
-}
-function saveWhaleList(list){
-  try{ localStorage.setItem('qm_whales', JSON.stringify(list)); } catch(e){ /* ignore */ }
-}
-function promptWhaleList(){
-  const current = loadWhaleList().map(w => w.address).join('\n');
-  const input = prompt('每行粘贴一个 Hyperliquid 钱包地址（0x 开头）：', current);
-  if(input === null) return;
-  const list = input.split('\n').map(s => s.trim())
-    .filter(s => /^0x[a-fA-F0-9]{40}$/.test(s))
-    .map(a => ({ address: a }));
-  saveWhaleList(list);
-  loadWhales();
-}
-
-async function fetchWhalePositions(address){
-  const res = await fetch(HL_API, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type: 'clearinghouseState', user: address })
-  });
-  if(!res.ok) throw new Error('HL request failed');
-  return res.json();
-}
-
-// Aggregate every watched whale's BTC/ETH exposure into one net long/short read.
-async function loadWhales(){
-  const el = document.getElementById('whaleContent');
-  const list = loadWhaleList();
-  if(list.length === 0){
-    el.innerHTML = `<div class="liq-empty">还没有配置巨鲸地址。Hyperliquid 的公开接口可以查任意地址的持仓，但无法直接列出"前40大巨鲸"——这份名单需要你自己提供（可从 Hyperliquid 官网排行榜或 HyperInsight 这类站点抄地址）。点下面按钮粘贴地址即可开始追踪。</div>
-      <button class="reset-stats-btn" onclick="promptWhaleList()">配置巨鲸地址</button>`;
-    return;
-  }
-  el.innerHTML = '<div class="liq-empty">正在读取链上持仓…</div>';
-  try{
-    const settled = await Promise.allSettled(list.map(w => fetchWhalePositions(w.address)));
-    const perCoin = {};
-    let okCount = 0;
-    settled.forEach(r => {
-      if(r.status !== 'fulfilled' || !r.value || !r.value.assetPositions) return;
-      okCount++;
-      r.value.assetPositions.forEach(ap => {
-        const p = ap.position; if(!p) return;
-        const coin = p.coin;
-        const szi = Number(p.szi || 0);          // signed size: + long, − short
-        const entry = Number(p.entryPx || 0);
-        const notional = Math.abs(szi) * entry;
-        if(!perCoin[coin]) perCoin[coin] = { long: 0, short: 0, longN: 0, shortN: 0 };
-        if(szi >= 0){ perCoin[coin].long += notional; perCoin[coin].longN++; }
-        else { perCoin[coin].short += notional; perCoin[coin].shortN++; }
-      });
-    });
-
-    const focus = ['BTC','ETH'].filter(c => perCoin[c]);
-    if(okCount === 0){
-      el.innerHTML = `<div class="liq-empty">${list.length} 个地址都没读到数据（可能是接口跨域受限或地址无持仓）。</div>
-        <button class="reset-stats-btn" onclick="promptWhaleList()">重新配置地址</button>`;
-      return;
-    }
-    if(focus.length === 0){
-      el.innerHTML = `<div class="liq-empty">已读取 ${okCount}/${list.length} 个地址，但这些账户当前没有 BTC/ETH 持仓。</div>
-        <button class="reset-stats-btn" onclick="promptWhaleList()">重新配置地址</button>`;
-      return;
-    }
-
-    el.innerHTML = focus.map(coin => {
-      const v = perCoin[coin];
-      const total = v.long + v.short;
-      const longPct = total > 0 ? v.long/total*100 : 50;
-      return `
-        <div style="margin-bottom:14px;">
-          <div class="liq-empty" style="margin-bottom:6px;">${coin} · ${v.longN} 个多头 / ${v.shortN} 个空头 · 名义总额 $${fmtUsd(total)}</div>
-          <div class="gauge-track">
-            <div class="gauge-up" style="width:${longPct}%"></div>
-            <div class="gauge-down" style="width:${100-longPct}%"></div>
-          </div>
-          <div class="gauge-labels">
-            <span class="u">多头 ${longPct.toFixed(0)}% ($${fmtUsd(v.long)})</span>
-            <span class="d">空头 ${(100-longPct).toFixed(0)}% ($${fmtUsd(v.short)})</span>
-          </div>
-        </div>
-      `;
-    }).join('') + `<div class="strategy-note">已读取 ${okCount}/${list.length} 个地址的链上持仓（Hyperliquid 公开数据）。按名义金额加权，不是账户数量。</div>
-      <button class="reset-stats-btn" onclick="promptWhaleList()">编辑地址列表</button>`;
-    window.__whaleBias = focus.reduce((acc,coin) => {
-      const v = perCoin[coin]; const t = v.long+v.short;
-      acc[coin] = t > 0 ? (v.long-v.short)/t : 0; return acc;
-    }, {});
-  } catch(err){
-    el.innerHTML = `<div class="liq-empty">巨鲸数据加载失败：${err.message}。</div>
-      <button class="reset-stats-btn" onclick="promptWhaleList()">重新配置地址</button>`;
-  }
-}
-
 // ---- JSONBin cross-device sync ----
 // Trade log lives in one hosted JSON bin so phone / iPad / desktop converge on
 // the same history. The log is the source of truth; win/loss counts are always
@@ -1872,7 +1891,7 @@ function setSyncStatus(cls, text){
 }
 
 // Pull remote, union with whatever this device has, write the merged result
-// back, and leave every device holding the same log.
+// back, and leave every device holding the same log and the same live plan.
 async function syncCloud(){
   if(jbSyncing) return;
   jbSyncing = true;
@@ -2037,12 +2056,10 @@ loadNews();
 loadOrderBook();
 loadSentiment();
 loadOverview();
-loadWhales();
 syncCloud();
 startTimer();
 setInterval(syncCloud, 60 * 1000);
 setInterval(loadOverview, 2 * 1000);
-setInterval(loadWhales, 2 * 60 * 1000);
 setInterval(loadNews, 10 * 1000);
 setInterval(loadLiquidation, 60 * 60 * 1000);
 setInterval(loadOrderBook, 5 * 1000);
