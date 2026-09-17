@@ -352,7 +352,7 @@
   <div class="news-card">
     <div class="news-head">
       <div class="label">消息面快报</div>
-      <div class="src" id="newsSrc">来源 · Cointelegraph / CoinDesk</div>
+      <div class="src" id="newsSrc">来源 · 加载中…</div>
     </div>
     <div id="newsList"><div class="news-empty">正在加载资讯…</div></div>
   </div>
@@ -365,6 +365,7 @@
 <script>
 const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 2 };
 const OKX_BASE = 'https://www.okx.com';
+const CRON_WORKER_URL = 'https://quant-cron.h18676717809.workers.dev';
 
 // Market microstructure captured by the slower loaders (order book, liquidation
 // map, funding) and consumed by the strategy. Each field is null until its
@@ -586,12 +587,49 @@ function resetStratStats(symbol){
   saveStratStats(symbol, { wins: 0, losses: 0, breakevens: 0 });
   saveStratState(symbol, null);
   saveTradeLog(symbol, []);
+  // Mark the cutoff so a stale device (or a Worker tick that already read the
+  // pre-reset bin) can't resurrect old entries back into the merged log the
+  // next time anything syncs — see mergeLogs()/syncCloud() below.
+  saveResetAt(symbol, Date.now());
+}
+function loadResetAt(symbol){
+  try{ return Number(localStorage.getItem(`qm_resetAt_${symbol}`)) || 0; } catch(e){ return 0; }
+}
+function saveResetAt(symbol, ts){
+  try{ localStorage.setItem(`qm_resetAt_${symbol}`, String(ts)); } catch(e){ /* ignore */ }
 }
 // Manual cancel: drop the current suggestion/position without recording a
 // win or loss, and drop into cooldown so the normal "wait for things to
 // stabilize" gate applies before a new suggestion is issued.
 function cancelStrategy(symbol){
   saveStratState(symbol, { status: 'cooldown', lastOutcome: 'cancelled', lastReason: 'cancelled', closedAt: Date.now() });
+}
+
+// On-demand only — never called on a timer. Hits the Worker's /analyze route,
+// which does its own fresh OKX pull + indicator computation and calls
+// DeepSeek once. Purely a display feature: nothing here writes any state,
+// trade log, or stats, so it can't affect the strategy engine either way.
+async function runAIAnalysis(symbol){
+  const btn = document.getElementById('aiAnalysisBtn');
+  const body = document.getElementById('aiAnalysisBody');
+  if(!btn || !body) return;
+  btn.disabled = true;
+  btn.textContent = '分析中…';
+  body.innerHTML = '<div class="liq-empty">正在请求 DeepSeek…</div>';
+  try{
+    const res = await fetch(`${CRON_WORKER_URL}/analyze?symbol=${symbol}`);
+    const json = await res.json();
+    if(!json.ok) throw new Error(json.error || 'unknown error');
+    body.innerHTML = `
+      <div class="strategy-note" style="padding:0 6px; line-height:1.8;">${json.analysis}</div>
+      <div class="liq-empty" style="padding:6px 6px 0;">生成于 ${new Date(json.generatedAt).toLocaleTimeString('zh-CN',{hour12:false})} · ${symbol} @ ${json.last}</div>
+    `;
+  } catch(err){
+    body.innerHTML = `<div class="liq-empty">分析失败：${err.message}。可以再点一次重试。</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '生成AI分析';
+  }
 }
 function loadTradeLog(symbol){
   try{
@@ -997,195 +1035,54 @@ async function loadData(){
     if(vp1h && ((vp1h.priceChangePct >= 0) !== (obvTrend1h >= 0))) divergenceReasons.push('1H OBV方向与价格不一致');
     const hasDivergence = divergenceReasons.length > 0;
 
-    // "企稳" gate used by the post-trade cooldown below: technical picture is a
-    // real multi-period consensus (not just a weak tie-break), and risk score
-    // isn't elevated. Both need to hold before the strategy redeploys.
+    // "企稳" gate — still computed client-side purely for display (the
+    // cooldown card explains why it isn't stabilized yet), not for advancing
+    // any state; nothing here writes anywhere.
     const isStabilized = strategyConfidence(score, TOTAL_WEIGHT) !== '弱' && riskScore <= 50;
 
-    // Locked-trade state machine: don't recompute entry/stop/target every
-    // cycle — hold the last suggestion until price actually resolves it
-    // (hits stop or target), tracking cumulative win/loss per symbol.
+    // Read-only: the Worker (Cloudflare Cron, every 1 minute) is now the sole
+    // writer of the live suggestion/state/log — it's the only thing that can
+    // see a consistent, single view of "did this trade just resolve" instead
+    // of every open tab racing to decide that independently. This client only
+    // displays whatever the last sync pulled down; syncCloud() (every 60s,
+    // plus immediately after cancel/reset) keeps that cache fresh.
+    // quality/vp/risk are still computed live for the readout below (quality
+    // score bars, 量价关系 card) — none of that writes anywhere either.
     let stratState = loadStratState(name);
     let stratStats = loadStratStats(name);
     let tradeLog = loadTradeLog(name);
 
-    // Anchor generation to the last CLOSED 5m candle rather than the live tick.
-    // Live price differs by a few dollars between devices, which was enough to
-    // produce a different entry/stop/target on each one; a closed candle is
-    // identical everywhere, so all devices derive the same suggestion.
-    const anchorPx = k5m.length >= 2 ? k5m[k5m.length-2].close : last;
-    // Only use microstructure context that belongs to the coin on screen —
-    // these loaders run on their own cadence and may still hold another symbol.
     const bookCtx = (marketCtx.book && marketCtx.book.symbol === name) ? marketCtx.book : null;
-    const liqCtx  = (marketCtx.liq  && marketCtx.liq.symbol  === name) ? marketCtx.liq  : null;
     const fundCtx = (marketCtx.funding && marketCtx.funding.symbol === name) ? marketCtx.funding : null;
-
-    const qualityDir = determineEffectiveDirection(score, periods[1].m.rsi, riskScore, anchorPx, cautionUpper, cautionLower).dir;
+    const qualityDir = stratState && stratState.dir
+      ? stratState.dir
+      : determineEffectiveDirection(score, periods[1].m.rsi, riskScore, last, cautionUpper, cautionLower).dir;
     const quality = entryQuality({
       score, totalWeight: TOTAL_WEIGHT, dir: qualityDir,
-      vp15, vp1h, riskScore, book: bookCtx, funding: fundCtx, atrPct,
+      vp15, vp1h, riskScore, book: bookCtx, funding: fundCtx,
     });
 
-    function freshSuggestion(){
-      const { dir, reversed } = determineEffectiveDirection(score, periods[1].m.rsi, riskScore, anchorPx, cautionUpper, cautionLower);
-      const built = buildStrategy(score, TOTAL_WEIGHT, anchorPx, k5m, k15, name, dir, reversed, periods[2].m.atr, vp15, vp1h, liqCtx);
-      const anchorBar = k5m.length >= 2 ? k5m[k5m.length-2].time : Date.now();
-      const next = { ...built, status: 'pending', createdAt: Date.now(), anchorBar, quality: quality.total };
-      saveStratState(name, next);
-      return next;
-    }
-    // Gates before a new suggestion is issued: volatility regime must be sane,
-    // and the composite setup quality must clear the bar. Quality is a blend of
-    // trend consensus, volume-price agreement, order-flow imbalance, risk state
-    // and funding crowding — so a merely "中" signal with everything else lined
-    // up still qualifies, while a "强" signal fighting the book does not.
-    function trySuggest(){
-      if(volRegime !== 'normal'){
-        const next = { status: 'volwait', volRegime, atrPct, closedAt: Date.now() };
-        saveStratState(name, next);
-        return next;
-      }
-      if(quality.total < QUALITY_MIN){
-        const next = { status: 'lowquality', quality: quality.total, closedAt: Date.now() };
-        saveStratState(name, next);
-        return next;
-      }
-      return freshSuggestion();
-    }
-
     if(!stratState){
-      stratState = trySuggest();
-    } else if(stratState.status === 'pending'){
-      const { dir: liveDir } = determineEffectiveDirection(score, periods[1].m.rsi, riskScore, last, cautionUpper, cautionLower);
-      if(liveDir !== stratState.dir){
-        // underlying thesis flipped before entry was ever hit — cancel and reissue
-        stratState = trySuggest();
-      } else {
-        const missedToTarget = stratState.dir === 'long' ? last >= stratState.rawTarget : last <= stratState.rawTarget;
-        const triggered = stratState.dir === 'long' ? last <= stratState.rawEntry : last >= stratState.rawEntry;
-        if(missedToTarget){
-          // price ran straight to (or past) the take-profit level without ever
-          // pulling back to fill the limit entry — nothing was ever actually
-          // taken, so this doesn't count as a win/loss, just redeploy.
-          stratState = trySuggest();
-        } else if(triggered){
-          stratState = {
-            ...stratState, status: 'active', activatedAt: Date.now(),
-            bestPrice: last, effectiveStop: stratState.rawStop, stopStage: 'initial'
-          };
-          saveStratState(name, stratState);
-        }
-      }
-    } else if(stratState.status === 'active'){
-      const riskDistance = Math.abs(stratState.rawEntry - stratState.rawStop);
-      const bestPrice = stratState.dir === 'long'
-        ? Math.max(stratState.bestPrice ?? stratState.rawEntry, last)
-        : Math.min(stratState.bestPrice ?? stratState.rawEntry, last);
-      const profitR = riskDistance > 0
-        ? (stratState.dir === 'long' ? (bestPrice - stratState.rawEntry) : (stratState.rawEntry - bestPrice)) / riskDistance
-        : 0;
-
-      // Stage the stop up as the trade moves into profit: breakeven at 1R,
-      // then trail to lock in 1R of gains once it's reached 2R. Never loosens.
-      // "Breakeven" means the true break-even *price* — the entry shifted far
-      // enough to cover round-trip fees — not the raw entry, which would still
-      // close at a small net loss once maker+taker fees are paid.
-      const feeOffset = stratState.rawEntry * (FEE_MAKER + FEE_TAKER);
-      const breakevenPx = stratState.dir === 'long'
-        ? stratState.rawEntry + feeOffset
-        : stratState.rawEntry - feeOffset;
-      let effectiveStop = stratState.effectiveStop ?? stratState.rawStop;
-      let stopStage = stratState.stopStage ?? 'initial';
-      if(profitR >= 2 && stopStage !== 'trailing'){
-        effectiveStop = stratState.dir === 'long' ? stratState.rawEntry + riskDistance : stratState.rawEntry - riskDistance;
-        stopStage = 'trailing';
-      } else if(profitR >= 1 && stopStage === 'initial'){
-        effectiveStop = breakevenPx;
-        stopStage = 'breakeven';
-      }
-
-      // Momentum-exhaustion early exit: once most of the way to target, if RSI
-      // is at an extreme in the trade's own direction, take the win early
-      // rather than risk giving it back waiting for the exact target print.
-      const fullDistance = Math.abs(stratState.rawTarget - stratState.rawEntry);
-      const progress = fullDistance > 0
-        ? (stratState.dir === 'long' ? (last - stratState.rawEntry) : (stratState.rawEntry - last)) / fullDistance
-        : 0;
-      const rsi15Now = periods[2].m.rsi;
-      const exhausted = stratState.dir === 'long' ? rsi15Now >= 75 : rsi15Now <= 25;
-      const nearTarget = progress >= 0.75 && progress < 1;
-
-      let outcome = null, reason = null;
-      if(nearTarget && exhausted){
-        outcome = 'win'; reason = 'exhaustion';
-      } else if(stratState.dir === 'long' ? last >= stratState.rawTarget : last <= stratState.rawTarget){
-        outcome = 'win'; reason = 'target';
-      } else if(stratState.dir === 'long' ? last <= effectiveStop : last >= effectiveStop){
-        // where the (possibly tightened) stop sits tells us what kind of exit this is
-        if(stopStage === 'trailing') { outcome = 'win'; reason = 'trailed'; }
-        else if(stopStage === 'breakeven') { outcome = 'breakeven'; reason = 'breakeven'; }
-        else { outcome = 'loss'; reason = 'stop'; }
-      }
-
-      if(outcome){
-        const key = outcome === 'win' ? 'wins' : outcome === 'breakeven' ? 'breakevens' : 'losses';
-        stratStats = { ...stratStats, [key]: (stratStats[key]||0) + 1 };
-        saveStratStats(name, stratStats);
-        tradeLog = [...tradeLog, {
-          result: outcome, reason, closedAt: Date.now(),
-          dir: stratState.dir,
-          entry: stratState.rawEntry,
-          exit: last,
-          target: stratState.rawTarget,
-          stop: stratState.rawStop,
-          openedAt: stratState.activatedAt || stratState.createdAt,
-        }].slice(-500);
-        saveTradeLog(name, tradeLog);
-        syncCloud();
-        // Don't redeploy immediately — sit out until sentiment/technicals
-        // stabilize, rather than chasing straight back in after a stop-out.
-        stratState = { status: 'cooldown', lastOutcome: outcome, lastReason: reason, closedAt: Date.now() };
-        saveStratState(name, stratState);
-      } else {
-        stratState = { ...stratState, bestPrice, effectiveStop, stopStage };
-        saveStratState(name, stratState);
-      }
-    } else if(stratState.status === 'cooldown'){
-      // Always sit out at least COOLDOWN_MS after a close (stop, target or
-      // manual cancel) before redeploying, on top of the stabilization gate.
-      const waited = Date.now() - (stratState.closedAt || 0);
-      if(waited >= COOLDOWN_MS && isStabilized){
-        stratState = trySuggest();
-      }
-    } else if(stratState.status === 'volwait'){
-      if(volRegime === 'normal'){
-        stratState = trySuggest();
-      } else if(stratState.volRegime !== volRegime){
-        stratState = { ...stratState, volRegime, atrPct, closedAt: Date.now() };
-        saveStratState(name, stratState);
-      }
-    } else if(stratState.status === 'lowquality'){
-      if(volRegime !== 'normal'){
-        stratState = { status: 'volwait', volRegime, atrPct, closedAt: Date.now() };
-        saveStratState(name, stratState);
-      } else if(quality.total >= QUALITY_MIN){
-        stratState = freshSuggestion();
-      } else if(Math.abs((stratState.quality||0) - quality.total) >= 1){
-        stratState = { ...stratState, quality: quality.total };
-        saveStratState(name, stratState);
-      }
+      stratState = { status: 'volwait', volRegime: 'normal', atrPct, closedAt: Date.now() };
     }
-    const strategy = ['cooldown','volwait','lowquality'].includes(stratState.status) ? null : stratState;
+    const strategy = ['cooldown','volwait','lowquality','ai_vetoed'].includes(stratState.status) ? null : stratState;
+    // Never-filled invalidations (missed/invalidated/expired/thesis_flipped)
+    // get a shorter cooldown than a real close — nothing was actually risked.
+    const requiredCooldownMs = stratState.cooldownMs || COOLDOWN_MS;
     const cooldownLeftMs = stratState.status === 'cooldown'
-      ? Math.max(0, COOLDOWN_MS - (Date.now() - (stratState.closedAt || 0))) : 0;
+      ? Math.max(0, requiredCooldownMs - (Date.now() - (stratState.closedAt || 0))) : 0;
     const stratWins = stratStats.wins || 0;
     const stratLosses = stratStats.losses || 0;
     const stratBreakevens = stratStats.breakevens || 0;
     const stratTotal = stratWins + stratLosses + stratBreakevens;
     const stratWinRate = (stratWins + stratLosses) > 0 ? (stratWins / (stratWins + stratLosses) * 100) : null;
-    const REASON_LABEL = { target: '止盈到位', exhaustion: '动能衰竭提前止盈', trailed: '移动止损锁盈', breakeven: '保本出场', stop: '止损', cancelled: '手动取消' };
+    const REASON_LABEL = { target: '止盈到位', exhaustion: '动能衰竭提前止盈', trailed: '移动止损锁盈', breakeven: '保本出场', stop: '止损', cancelled: '手动取消',
+      missed: '价格冲过止盈位仍未成交（撤单重挂）', invalidated: '价格已跌破/突破止损位仍未成交（撤单重挂）',
+      expired: '挂单45分钟未成交（超时重挂）', thesis_flipped: '多周期方向明显反转（撤单重挂）' };
+    const NEVER_FILLED_REASONS = ['missed', 'invalidated', 'expired', 'thesis_flipped'];
     const statusLabel = stratState.status === 'lowquality' ? `入场质量不足（${quality.total.toFixed(0)}/100，需≥${QUALITY_MIN}），等更好的机会`
       : stratState.status === 'volwait' ? `波动率异常，暂停出信号（ATR处于近期${atrPct.toFixed(0)}分位）`
+      : stratState.status === 'ai_vetoed' ? 'DeepSeek 审查未放行，等冷静期+企稳后重新评估'
       : !strategy ? '观望中，等待情绪与技术面企稳后再布局'
       : strategy.status === 'active' ? `持仓中${strategy.stopStage==='trailing' ? '（止损已上移锁盈）' : strategy.stopStage==='breakeven' ? '（止损已移至保本位）' : ''}，等待触及止损/止盈`
       : '待入场，等待价格触达限价位';
@@ -1277,14 +1174,28 @@ async function loadData(){
           <div class="strategy-dir flat">波动率异常，暂停信号</div>
         </div>
         <div class="status-badge cooldown">○ 观望中<span>${statusLabel}</span></div>
-        <div class="strategy-note">${VOL_REGIME_LABEL[volRegime] || VOL_REGIME_LABEL[stratState.volRegime] || ''}。当前15m ATR处于最近历史的第 <b>${atrPct.toFixed(0)}</b> 百分位（正常区间15-90）。${volRegime==='low' ? '行情太安静，EMA/RSI/MACD这类指标在窄幅震荡里容易反复打脸。' : volRegime==='high' ? '波动骤然放大，可能是突发消息行情，这时候找的支撑压力位不一定靠得住。'  : ''}等波动率回到正常区间再重新评估。</div>
+        <div class="strategy-note">${VOL_REGIME_LABEL[volRegime] || VOL_REGIME_LABEL[stratState.volRegime] || ''}。当前15m ATR处于最近历史的第 <b>${atrPct.toFixed(0)}</b> 百分位（正常区间15-90）。${volRegime==='low' ? '行情太安静，EMA/RSI/MACD这类指标在窄幅震荡里容易反复打脸。' : volRegime==='high' ? '波动骤然放大，可能是突发消息行情，这时候找的支撑压力位不一定靠得住。'  : ''}等波动率回到正常区间再重新评估。${stratState.reason ? `<br><br><b>DeepSeek 联网查了一下：</b>${stratState.reason}` : (stratState.volRegime==='high' ? '<br><br>（未能取得AI的诱因分析，稍后会重新尝试）' : '')}</div>
+        ` : stratState.status === 'ai_vetoed' ? `
+        <div class="strategy-head">
+          <div class="strategy-dir flat">AI审查未通过</div>
+          <div class="confidence">规则引擎原判 · ${stratState.dir==='long'?'做多':'做空'}</div>
+        </div>
+        <div class="status-badge cooldown">○ 观望中<span>${statusLabel}</span></div>
+        <div class="strategy-grid">
+          <div class="strategy-cell"><div class="k">规则算出的入场</div><div class="v entry">${stratState.entry}</div></div>
+          <div class="strategy-cell"><div class="k">规则算出的止损</div><div class="v stop">${stratState.stop}</div></div>
+          <div class="strategy-cell"><div class="k">规则算出的止盈</div><div class="v target">${stratState.target}</div></div>
+        </div>
+        <div class="strategy-note"><b style="color:var(--neg)">DeepSeek 否决理由：</b>${stratState.aiReason || '（未返回具体理由）'}<br><br>规则引擎本身算出的信号是合理的（信号强度${stratState.confidence}），只是AI审查这一道关卡没放行。这单不计入胜负统计，等冷静期+企稳条件满足后会重新评估（届时会重新走一次AI审查，不是自动放行）。</div>
         ` : !strategy ? `
         <div class="strategy-head">
           <div class="strategy-dir flat">观望中</div>
         </div>
         <div class="status-badge cooldown">○ 观望中<span>${statusLabel}</span></div>
-        <div class="strategy-note">${stratState.lastReason === 'cancelled' ? '已手动取消策略（未计入胜负统计）' : `上一单${REASON_LABEL[stratState.lastReason] || (stratState.lastOutcome==='win'?'止盈':stratState.lastOutcome==='breakeven'?'保本':'止损')}平仓`}后进入观望，避免刚平完就立刻反手追进去。<br>
-          重新布局需同时满足两个条件：<b>①</b> 冷静期满 10 分钟 —— ${cooldownLeftMs > 0 ? `还剩 <b style="color:var(--neutral)">${Math.ceil(cooldownLeftMs/60000)} 分钟</b>` : '<b style="color:var(--pos)">已满足</b>'}；<b>②</b> 信号强度回到"中"或以上且风险概率低于50 —— 当前信号强度 <b>${strategyConfidence(score, TOTAL_WEIGHT)}</b>、风险概率 <b>${riskScore}%</b>，${(strategyConfidence(score, TOTAL_WEIGHT)!=='弱' && riskScore<=50) ? '<b style="color:var(--pos)">已满足</b>' : '<b style="color:var(--neutral)">尚未满足</b>'}。</div>
+        <div class="strategy-note">${stratState.lastReason === 'cancelled' ? '已手动取消策略（未计入胜负统计）'
+          : NEVER_FILLED_REASONS.includes(stratState.lastReason) ? `上一张限价单${REASON_LABEL[stratState.lastReason]}，从未成交（未计入胜负统计）`
+          : `上一单${REASON_LABEL[stratState.lastReason] || (stratState.lastOutcome==='win'?'止盈':stratState.lastOutcome==='breakeven'?'保本':'止损')}平仓`}后进入观望，避免刚结束就立刻反手追进去。<br>
+          重新布局需同时满足三个条件：<b>①</b> 冷静期满 ${Math.round(requiredCooldownMs/60000)} 分钟 —— ${cooldownLeftMs > 0 ? `还剩 <b style="color:var(--neutral)">${Math.ceil(cooldownLeftMs/60000)} 分钟</b>` : '<b style="color:var(--pos)">已满足</b>'}；<b>②</b> 信号强度回到"中"或以上且风险概率低于50 —— 当前信号强度 <b>${strategyConfidence(score, TOTAL_WEIGHT)}</b>、风险概率 <b>${riskScore}%</b>，${(strategyConfidence(score, TOTAL_WEIGHT)!=='弱' && riskScore<=50) ? '<b style="color:var(--pos)">已满足</b>' : '<b style="color:var(--neutral)">尚未满足</b>'}；<b>③</b> 入场质量分 ≥ ${QUALITY_MIN} —— 当前 <b>${quality.total.toFixed(0)}</b> 分，${quality.total>=QUALITY_MIN ? '<b style="color:var(--pos)">已满足</b>' : '<b style="color:var(--neutral)">尚未满足</b>'}。三个条件全部满足才会重新出单，差哪个都会继续观望。</div>
         ` : `
         <div class="strategy-head">
           <div class="strategy-dir ${strategy.dir}">${strategy.dirLabel}</div>
@@ -1310,9 +1221,17 @@ async function loadData(){
           <div class="v ${stratWinRate===null?'mid':stratWinRate>=55?'high':stratWinRate>=45?'mid':'low'}">${stratWinRate===null?'—':stratWinRate.toFixed(0)+'%'}</div>
         </div>
         <button class="reset-stats-btn" onclick="cancelStrategy('${name}'); syncCloud().then(loadData);">取消当前策略</button>
-        <button class="reset-stats-btn" onclick="resetStratStats('${name}'); loadData();">重置${name}统计</button>
+        <button class="reset-stats-btn" onclick="resetStratStats('${name}'); syncCloud().then(loadData);">重置${name}统计</button>
         <div class="strategy-note">${strategy.note}</div>
         `}
+      </div>
+
+      <div class="table-card">
+        <div class="label">AI 综合分析 · DeepSeek（手动触发，不自动运行）</div>
+        <div id="aiAnalysisBody">
+          <div class="strategy-note" style="padding:0 6px;">点击按钮，让 DeepSeek 结合当前 ${name} 的趋势评分、量价关系、风险概率、资金费率、盘口失衡这些数据，给一段综合研判。只有你点了才会调用，不跟着2秒刷新，也不会自动运行。</div>
+        </div>
+        <button class="reset-stats-btn" id="aiAnalysisBtn" onclick="runAIAnalysis('${name}')">生成AI分析</button>
       </div>
 
       <div class="table-card">
@@ -1705,6 +1624,32 @@ function timeAgo(dateStr){
 
 async function loadNews(){
   const listEl = document.getElementById('newsList');
+  const srcEl = document.getElementById('newsSrc');
+
+  // Primary: cryptocurrency.cv — no key, CORS-enabled JSON, 300+ sources incl.
+  // a dedicated "breaking" (last 2h) endpoint, so fresher and far broader than
+  // the 2-feed RSS2JSON pipeline this replaces as the default.
+  try{
+    const [breakingRes, newsRes] = await Promise.all([
+      fetch('https://cryptocurrency.cv/api/breaking').then(r => r.json()),
+      fetch('https://cryptocurrency.cv/api/news?limit=20').then(r => r.json()),
+    ]);
+    const raw = [...(breakingRes.articles||[]), ...(newsRes.articles||[])];
+    const seen = new Set();
+    let items = raw.filter(a => {
+      if(!a.link || seen.has(a.link)) return false;
+      seen.add(a.link); return true;
+    }).map(a => ({ title: a.title, link: a.link, pubDate: a.pubDate, source: a.source }));
+    if(items.length > 0){
+      items.sort((a,b) => new Date(b.pubDate) - new Date(a.pubDate));
+      renderNews(listEl, items.slice(0, 10));
+      if(srcEl) srcEl.textContent = '来源 · cryptocurrency.cv（300+源，含突发新闻）';
+      return;
+    }
+  } catch(primaryErr){ /* fall through to the RSS2JSON backup below */ }
+
+  // Fallback: original 2-feed RSS2JSON pipeline, only used if the primary
+  // source above is unreachable or returns nothing.
   try{
     const results = await Promise.allSettled(NEWS_FEEDS.map(f =>
       fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(f.url)}&count=6&api_key=${RSS2JSON_KEY}`)
@@ -1720,8 +1665,15 @@ async function loadNews(){
       return;
     }
     items.sort((a,b) => new Date(b.pubDate) - new Date(a.pubDate));
-    items = items.slice(0, 8);
-    listEl.innerHTML = items.map(it => {
+    if(srcEl) srcEl.textContent = '来源 · Cointelegraph / CoinDesk（备用源）';
+    renderNews(listEl, items.slice(0, 8));
+  } catch(err){
+    listEl.innerHTML = '<div class="news-empty">资讯加载失败，稍后自动重试。</div>';
+  }
+}
+
+function renderNews(listEl, items){
+  listEl.innerHTML = items.map(it => {
       const { cls, stars } = classifyHeadline(it.title);
       return `
         <div class="news-item">
@@ -1734,9 +1686,6 @@ async function loadNews(){
         </div>
       `;
     }).join('');
-  } catch(err){
-    listEl.innerHTML = '<div class="news-empty">资讯加载失败，稍后自动重试。</div>';
-  }
 }
 
 // Explainable trend score, 0-100, weighted from four named components so the
@@ -1860,10 +1809,12 @@ function statsFromLog(log){
     breakevens: log.filter(t => t.result === 'breakeven').length,
   };
 }
-// Union by closedAt — the same trade recorded on two devices collapses to one.
-function mergeLogs(a, b){
+// Union by closedAt — the same trade recorded on two devices collapses to
+// one. Entries at or before `cutoff` are dropped, so a reset (see resetAt
+// below) can't be resurrected by a stale device's local copy.
+function mergeLogs(a, b, cutoff=0){
   const seen = new Map();
-  [...(a||[]), ...(b||[])].forEach(t => { if(t && t.closedAt) seen.set(t.closedAt, t); });
+  [...(a||[]), ...(b||[])].forEach(t => { if(t && t.closedAt && t.closedAt > cutoff) seen.set(t.closedAt, t); });
   return [...seen.values()].sort((x,y) => x.closedAt - y.closedAt).slice(-500);
 }
 
@@ -1903,7 +1854,15 @@ async function syncCloud(){
     ['BTC','ETH','ZEC'].forEach(sym => {
       const localLog  = loadTradeLog(sym);
       const remoteLog = (remote && remote[sym] && remote[sym].log) || [];
-      const m = mergeLogs(localLog, remoteLog);
+      // Resets propagate as a cutoff timestamp, not by trusting an empty log
+      // to "win" — the larger of the two sides' reset markers governs, so a
+      // fresh local reset overrides a stale remote, and a remote reset (from
+      // another device) overrides this device's stale local copy either way.
+      const localResetAt  = loadResetAt(sym);
+      const remoteResetAt = (remote && remote[sym] && remote[sym].resetAt) || 0;
+      const resetAt = Math.max(localResetAt, remoteResetAt);
+      if(remoteResetAt > localResetAt) saveResetAt(sym, remoteResetAt);
+      const m = mergeLogs(localLog, remoteLog, resetAt);
 
       // Live suggestion: whichever device wrote most recently wins, so every
       // device shows the same entry/stop/target instead of its own version.
@@ -1920,13 +1879,13 @@ async function syncCloud(){
         remoteStale = true;
       }
 
-      merged[sym] = { log: m, stats: statsFromLog(m), state: chosenState };
+      merged[sym] = { log: m, stats: statsFromLog(m), state: chosenState, resetAt };
       if(m.length !== localLog.length){
         saveTradeLog(sym, m);
         saveStratStats(sym, statsFromLog(m));
         localChanged = true;
       }
-      if(m.length !== remoteLog.length) remoteStale = true;
+      if(m.length !== remoteLog.length || resetAt !== remoteResetAt) remoteStale = true;
     });
     merged.updatedAt = new Date().toISOString();
     if(remoteStale) await jbWrite(merged);
