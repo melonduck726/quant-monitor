@@ -365,7 +365,6 @@
 <script>
 const state = { inst: 'BTC-USDT-SWAP', name: 'BTC', accent: 'btc', timer: null, countdown: 2 };
 const OKX_BASE = 'https://www.okx.com';
-const CRON_WORKER_URL = 'https://quant-cron.h18676717809.workers.dev';
 
 // Market microstructure captured by the slower loaders (order book, liquidation
 // map, funding) and consumed by the strategy. Each field is null until its
@@ -583,15 +582,6 @@ function loadStratStats(symbol){
 function saveStratStats(symbol, stats){
   try{ localStorage.setItem(`qm_stratStats_${symbol}`, JSON.stringify(stats)); } catch(e){ /* ignore */ }
 }
-function resetStratStats(symbol){
-  saveStratStats(symbol, { wins: 0, losses: 0, breakevens: 0 });
-  saveStratState(symbol, null);
-  saveTradeLog(symbol, []);
-  // Mark the cutoff so a stale device (or a Worker tick that already read the
-  // pre-reset bin) can't resurrect old entries back into the merged log the
-  // next time anything syncs — see mergeLogs()/syncCloud() below.
-  saveResetAt(symbol, Date.now());
-}
 function loadResetAt(symbol){
   try{ return Number(localStorage.getItem(`qm_resetAt_${symbol}`)) || 0; } catch(e){ return 0; }
 }
@@ -605,32 +595,6 @@ function cancelStrategy(symbol){
   saveStratState(symbol, { status: 'cooldown', lastOutcome: 'cancelled', lastReason: 'cancelled', closedAt: Date.now() });
 }
 
-// On-demand only — never called on a timer. Hits the Worker's /analyze route,
-// which does its own fresh OKX pull + indicator computation and calls
-// DeepSeek once. Purely a display feature: nothing here writes any state,
-// trade log, or stats, so it can't affect the strategy engine either way.
-async function runAIAnalysis(symbol){
-  const btn = document.getElementById('aiAnalysisBtn');
-  const body = document.getElementById('aiAnalysisBody');
-  if(!btn || !body) return;
-  btn.disabled = true;
-  btn.textContent = '分析中…';
-  body.innerHTML = '<div class="liq-empty">正在请求 DeepSeek…</div>';
-  try{
-    const res = await fetch(`${CRON_WORKER_URL}/analyze?symbol=${symbol}`);
-    const json = await res.json();
-    if(!json.ok) throw new Error(json.error || 'unknown error');
-    body.innerHTML = `
-      <div class="strategy-note" style="padding:0 6px; line-height:1.8;">${json.analysis}</div>
-      <div class="liq-empty" style="padding:6px 6px 0;">生成于 ${new Date(json.generatedAt).toLocaleTimeString('zh-CN',{hour12:false})} · ${symbol} @ ${json.last}</div>
-    `;
-  } catch(err){
-    body.innerHTML = `<div class="liq-empty">分析失败：${err.message}。可以再点一次重试。</div>`;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '生成AI分析';
-  }
-}
 function loadTradeLog(symbol){
   try{
     const raw = localStorage.getItem(`qm_tradeLog_${symbol}`);
@@ -1226,17 +1190,8 @@ async function loadData(){
           <div class="v ${stratWinRate===null?'mid':stratWinRate>=55?'high':stratWinRate>=45?'mid':'low'}">${stratWinRate===null?'—':stratWinRate.toFixed(0)+'%'}</div>
         </div>
         <button class="reset-stats-btn" onclick="cancelStrategy('${name}'); syncCloud().then(loadData);">取消当前策略</button>
-        <button class="reset-stats-btn" onclick="resetStratStats('${name}'); syncCloud().then(loadData);">重置${name}统计</button>
         <div class="strategy-note">${strategy.note}</div>
         `}
-      </div>
-
-      <div class="table-card">
-        <div class="label">AI 综合分析 · DeepSeek（手动触发，不自动运行）</div>
-        <div id="aiAnalysisBody">
-          <div class="strategy-note" style="padding:0 6px;">点击按钮，让 DeepSeek 结合当前 ${name} 的趋势评分、量价关系、风险概率、资金费率、盘口失衡这些数据，给一段综合研判。只有你点了才会调用，不跟着2秒刷新，也不会自动运行。</div>
-        </div>
-        <button class="reset-stats-btn" id="aiAnalysisBtn" onclick="runAIAnalysis('${name}')">生成AI分析</button>
       </div>
 
       <div class="table-card">
