@@ -1207,6 +1207,11 @@ async function loadData(){
           <div class="strategy-cell"><div class="k">止损参考${strategy.status==='active' && strategy.stopStage!=='initial' ? '（已上移）' : ''}</div><div class="v stop">${strategy.status==='active' && strategy.effectiveStop!==undefined ? fmt(strategy.effectiveStop, d) : strategy.stop}</div></div>
           <div class="strategy-cell"><div class="k">止盈参考（1:${strategy.rr}）</div><div class="v target">${strategy.target}</div></div>
         </div>
+        ${strategy.ai && strategy.ai.checked ? `
+        <div class="strategy-note" style="padding:8px 10px; margin-bottom:10px; background:var(--surface-2); border-left:3px solid var(--pos); border-radius:6px;"><b style="color:var(--pos)">✓ DeepSeek审查通过</b>${strategy.ai.reason ? `：${strategy.ai.reason}` : '（未附具体理由）'}</div>
+        ` : `
+        <div class="strategy-note" style="padding:8px 10px; margin-bottom:10px; background:var(--surface-2); border-left:3px solid var(--text-dim); border-radius:6px; color:var(--text-dim);">本单生成时AI审查未能完成（超时或服务异常），按规则引擎结果直接放行——这是设计好的"失败开放"行为，不代表AI批准了这单。</div>
+        `}
         ${quality.parts.map(p => `<div class="q-row"><span class="q-k">${p.k}</span><div class="q-bar"><i style="width:${(p.v/p.max*100).toFixed(0)}%"></i></div><span class="q-v">${p.v.toFixed(0)}/${p.max}</span><span class="q-n">${p.note}</span></div>`).join('')}
         <div class="winrate-row">
           <div class="k">预测胜率（15m 规则回测）<span class="sample">${backtest ? `近 ${backtest.sample} 次同类信号，95%置信区间 ${backtest.ciLow.toFixed(0)}–${backtest.ciHigh.toFixed(0)}%` : '样本不足'}</span></div>
